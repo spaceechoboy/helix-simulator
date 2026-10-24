@@ -515,7 +515,7 @@ function syncVisibility(f) {
   const show = (sel, ok) => form.querySelectorAll(sel).forEach((n) => { n.hidden = !ok(n); });
   show('[data-show]', (n) => n.dataset.show === f.asset);
   show('[data-show-cost]', (n) => n.dataset.showCost === f.costBasis);
-  show('[data-show-route]', (n) => n.dataset.showRoute === f.route);
+  show('[data-show-route]', (n) => n.dataset.showRoute === f.route && (!n.classList.contains('burn-basis') || f.asset === 'LGNS'));
   show('[data-show-fx]', (n) => n.dataset.showFx.split(' ').includes(f['fx.mode']));
   show('[data-show-funding]', (n) => n.dataset.showFunding === f.funding);
   show('[data-show-usage]', (n) => n.dataset.showUsage === f.usage);
@@ -531,7 +531,7 @@ function syncVisibility(f) {
   if ([...sel.options].map((o) => o.value).join() !== want.join()) {
     sel.innerHTML = want.map((r) => `<option value="${r}">${esc(routeLabel(r))}</option>`).join('');
     sel.value = want[0]; f.route = want[0];
-    show('[data-show-route]', (n) => n.dataset.showRoute === f.route);
+    show('[data-show-route]', (n) => n.dataset.showRoute === f.route && (!n.classList.contains('burn-basis') || f.asset === 'LGNS'));
   }
   $('route-hint').textContent = f.route === ROUTES.POLYGON_FIXED
     ? 'FIXED 단계 소각과 HELIX 단계 소각을 따로 기록합니다. 원금은 처음 가진 Polygon LGNS의 원가입니다.'
@@ -778,6 +778,14 @@ function recompute({ preserveOptimizer = false } = {}) {
 function renderConversion(out) {
   const box = $('conversion-summary'); if (!box) return;
   const c = conversionSummary(out);
+  const equivalent = $('input-equivalent');
+  if (equivalent) {
+    const asset = readForm().asset;
+    equivalent.hidden = asset !== 'DAI' && asset !== 'KRW';
+    equivalent.textContent = asset === 'DAI'
+      ? (c?.krwValue != null ? `약 ${fmtN(toNum(c.krwValue), 0)}원` : '원화 환산: 실시간 환율 확인 중')
+      : (c?.daiValue != null ? `약 ${fmtDai(c.daiValue, 2)}` : 'DAI 환산: 입력 금액·실시간 환율 확인 필요');
+  }
   if (!c) {
     const msg = out?.errors?.find((e) => /환율|시세|Power|POWER/.test(e)) ?? out?.errors?.[0] ?? '금액을 입력하세요.';
     box.innerHTML = `<p class="conversion-empty">환산할 수 없음 · ${esc(msg)}</p>`;

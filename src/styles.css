@@ -356,3 +356,5 @@ a { color: var(--teal); }
 .market-asset img { width: 30px; height: 30px; object-fit: contain; flex: 0 0 30px; }
 .market-list li small { padding-left: 38px; margin-top: 4px; }
 .market-list li b { font-variant-numeric: tabular-nums; }
+
+.input-equivalent { margin-top: -6px; color: var(--ink-2); font-size: .95rem; font-weight: 600; font-variant-numeric: tabular-nums; }
