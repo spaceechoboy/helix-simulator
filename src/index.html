@@ -116,8 +116,8 @@
       <h3>날짜와 기간</h3>
       <label>시작 날짜 (KST)<input name="startDate" type="date"></label>
       <label>기간 기준<select name="periodMode">
-        <option value="CALENDAR">달력 3·6·12개월</option>
-        <option value="FIXED_DAYS">90·180·365일</option>
+        <option value="CALENDAR">달력 기간</option>
+        <option value="FIXED_DAYS">고정 일수</option>
       </select></label>
 
       <div data-show="LGNS" id="lgns-settings">
@@ -173,7 +173,7 @@
 
   <div class="results">
     <section class="card results-summary"><h2>기간별 수령액과 수익률</h2>
-    <div id="quick-summary" class="quick-summary" aria-live="polite" aria-label="3·6·12개월 매일 받기 비교 기준"></div>
+    <div id="quick-summary" class="quick-summary" aria-live="polite" aria-label="3·6·12·18·24개월 매일 받기 비교 기준"></div>
     </section>
     <div id="input-errors" class="errors" role="alert" aria-live="assertive"></div>
 
@@ -195,9 +195,9 @@
         <span class="field-label" id="lbl-period">결과를 볼 기간</span>
         <div class="seg" role="radiogroup" aria-labelledby="lbl-period">
           <label><input type="radio" name="horizonYears" value="0.5" form="inputs"> 6개월</label>
-          <label><input type="radio" name="horizonYears" value="1" form="inputs" checked> 1년</label>
+          <label><input type="radio" name="horizonYears" value="1" form="inputs"> 1년</label>
           <label><input type="radio" name="horizonYears" value="2" form="inputs"> 2년</label>
-          <label><input type="radio" name="horizonYears" value="3" form="inputs"> 3년</label>
+          <label><input type="radio" name="horizonYears" value="3" form="inputs" checked> 3년</label>
         </div>
       </div>
       <div id="compare-body"></div>

@@ -19,7 +19,7 @@ test('dates: 말일 clamp·윤년·실제 날짜·마일스톤·프로토콜 경
   assert.equal(addMonths('2027-11-30', 3), '2028-02-29');
   assert.equal(isValidDate('2026-02-30'), false);
   assert.deepEqual(milestones('2026-10-23', 1).map((m) => m.day), [92, 182, 365]);
-  assert.deepEqual(milestones('2026-10-23', 3, 'FIXED_DAYS').map((m) => m.day), [90, 180, 365, 730, 1095]);
+  assert.deepEqual(milestones('2026-10-23', 3, 'FIXED_DAYS').map((m) => m.day), [90, 180, 365, 548, 730, 1095]);
   const b = firstBoundary('2026-10-23', 1792684800 % 86400, 86400);
   assert.equal(kstDate(b), '2026-10-23');
   assert.equal(b % 86400, 57600); // 01:00 KST, 자정 하드코딩 아님

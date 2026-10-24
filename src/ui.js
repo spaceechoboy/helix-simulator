@@ -75,7 +75,7 @@ export function formToRaw(f) {
   const raw = {
     asset, amount, startDate: s('startDate'),
     funding: s('funding') ?? FUNDING.SELF, reserveDai: s('reserveDai') ?? '0', totalBudgetDai: s('totalBudgetDai'),
-    horizonYears: Number(s('horizonYears') ?? 1), periodMode: s('periodMode') ?? 'CALENDAR', priceModel: s('priceModel') ?? 'LINEAR',
+    horizonYears: Number(s('horizonYears') ?? 3), periodMode: s('periodMode') ?? 'CALENDAR', priceModel: s('priceModel') ?? 'LINEAR',
   };
   if (asset === 'LGNS') {
     raw.lgnsChain = s('lgnsChain');
@@ -397,7 +397,7 @@ export const QUICK_POLICIES = [{ recycleBps: 0 }, { recycleBps: 5000 }, { recycl
 
 /** 3·6·12개월 카드(같은 장부의 마일스톤 행). 2·3년은 자세히 표에만. */
 export function milestoneCards(result) {
-  return result.summary.milestones.filter((m) => m.months <= 12).map((m) => ({ label: m.label, date: m.date, record: m.record ?? null }));
+  return result.summary.milestones.filter((m) => m.months <= 24).map((m) => ({ label: m.label, date: m.date, record: m.record ?? null }));
 }
 
 /**
@@ -1023,7 +1023,7 @@ function jumpTo(i) { if (!st.charts) return; st.charts.setCursor(i); st.charts.p
 function renderMilestones() {
   const { result } = st.out, dv = derive(result), det = st.showMsDetail;
   if (!cashResultReady(st.out)) {
-    $('milestones').innerHTML = `<h2>3·6·12개월 현금 결과</h2>${incompleteCashMarkup({ advice: false })}
+    $('milestones').innerHTML = `<h2>기간별 현금 결과</h2>${incompleteCashMarkup({ advice: false })}
       <p class="hint">미완료 장부의 0원·음수 ROI는 정상 성과가 아니므로 기간별 결과를 표시하지 않습니다.</p>`;
     return;
   }
@@ -1048,10 +1048,10 @@ function renderMilestones() {
         <span class="ms-sub">순이익 ${fmtDai(c.record.net, 0)}</span>
       </button>`;
   }).join('');
-  $('milestones').innerHTML = `<h2 class="desktop-only">3·6·12개월에 받은 현금</h2><div class="ms-cards desktop-only">${cards}</div>
+  $('milestones').innerHTML = `<h2 class="desktop-only">기간별 받은 현금</h2><div class="ms-cards desktop-only">${cards}</div>
     <details class="ms-more" id="ms-more" ${st.msOpen ? 'open' : ''}><summary>자세히 (전체 기간 표)</summary>
     <div class="tbl-wrap"><table><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>
-    <p class="hint">목표일은 시작일의 달력상 +3/+6/+12개월(또는 고정 일수)이고, 값은 목표일 전 마지막 정산의 마감 상태입니다.
+    <p class="hint">목표일은 시작일의 달력상 +3/+6/+12/+18/+24/+36개월(선택 기간 내, 또는 고정 일수)이고, 값은 목표일 전 마지막 정산의 마감 상태입니다.
     모두 같은 장부에서 읽으며, 준비금은 마지막 날에만 돌려받습니다. 누적 배출 DAI 가치는 현금이 아닙니다.</p>
     <label class="inline"><input type="checkbox" id="ms-detail" ${det ? 'checked' : ''}> 상세 열 보기</label></details>`;
   $('ms-detail').onchange = (e) => { st.showMsDetail = e.target.checked; renderMilestones(); };

@@ -42,9 +42,9 @@ export function horizonDays(startDate, years, mode = 'CALENDAR') {
 
 /** 3·6·12개월(+24/36). FIXED_DAYS는 90/180/365(+730/1095). day=시작일부터 경과일. */
 export function milestones(startDate, years, mode = 'CALENDAR') {
-  const months = [3, 6, 12, ...(years >= 2 ? [24] : []), ...(years >= 3 ? [36] : [])];
+  const months = [3, 6, 12, ...(years >= 2 ? [18, 24] : []), ...(years >= 3 ? [36] : [])];
   return months.map((mo) => {
-    const day = mode === 'FIXED_DAYS' ? { 3: 90, 6: 180, 12: 365, 24: 730, 36: 1095 }[mo] : daysBetween(startDate, addMonths(startDate, mo));
-    return { label: mo < 12 ? `${mo}개월` : `${mo / 12}년`, months: mo, day, date: addDays(startDate, day) };
+    const day = mode === 'FIXED_DAYS' ? { 3: 90, 6: 180, 12: 365, 18: 548, 24: 730, 36: 1095 }[mo] : daysBetween(startDate, addMonths(startDate, mo));
+    return { label: mo === 18 ? '1년 6개월' : mo < 12 ? `${mo}개월` : `${mo / 12}년`, months: mo, day, date: addDays(startDate, day) };
   });
 }

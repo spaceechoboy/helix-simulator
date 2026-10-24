@@ -571,7 +571,7 @@ test('DAI 기본 계산: 차트·마일스톤·CSV가 같은 단일 장부를 �
 test('ROI 3년 표는 24/36개월 행 포함, ROI 차트 전환', () => {
   const out = compute(F({ horizonYears: '3', policyType: 'switch', switchDay: '200' }), SNAP);
   assert.deepEqual(out.errors, []);
-  assert.deepEqual(out.result.summary.milestones.map((x) => x.label), ['3개월', '6개월', '1년', '2년', '3년']);
+  assert.deepEqual(out.result.summary.milestones.map((x) => x.label), ['3개월', '6개월', '1년', '1년 6개월', '2년', '3년']);
   const m = chartModel(out.result, { roiView: true });
   assert.equal(m.charts[2].id, 'roi');
 });
@@ -769,7 +769,7 @@ test('메인 그래프 탭 1개·3/6/12 카드: 같은 장부, 커서 모델 유
   }
   assert.equal(singleChartModel(full, 9).charts[0], full.charts[2]);
   const cards = milestoneCards(out.result);
-  assert.deepEqual(cards.map((c) => c.label), ['3개월', '6개월', '1년']);
+  assert.deepEqual(cards.map((c) => c.label), ['3개월', '6개월', '1년', '1년 6개월', '2년']);
   cards.forEach((c, i) => assert.equal(c.record, out.result.summary.milestones[i].record));
 });
 
