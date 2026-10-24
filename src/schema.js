@@ -22,7 +22,7 @@ export const ROUTES = Object.freeze({
   POLYGON_LGNS_SELL_DAI: 'POLYGON_LGNS_SELL_DAI',
 });
 
-export const COST_BASIS = Object.freeze({ OPPORTUNITY: 'OPPORTUNITY', ACQUISITION: 'ACQUISITION' });
+export const COST_BASIS = Object.freeze({ FIXED_ONE_DAI: 'FIXED_ONE_DAI', OPPORTUNITY: 'OPPORTUNITY', ACQUISITION: 'ACQUISITION' });
 export const FUNDING = Object.freeze({ SELF: 'SELF', EXTERNAL: 'EXTERNAL' });
 export const FX_MODES = Object.freeze({ DIRECT: 'DIRECT', CROSS: 'CROSS', MANUAL: 'MANUAL' });
 export const PERIOD_MODES = Object.freeze({ CALENDAR: 'CALENDAR', FIXED_DAYS: 'FIXED_DAYS' });

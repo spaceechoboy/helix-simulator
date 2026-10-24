@@ -80,7 +80,7 @@ export function formToRaw(f) {
   if (asset === 'LGNS') {
     raw.lgnsChain = s('lgnsChain');
     raw.route = s('route') ?? routesFor(raw.lgnsChain)[0];
-    raw.costBasis = s('costBasis') ?? 'OPPORTUNITY';
+    raw.costBasis = raw.route === ROUTES.ANUBIS_LGNS_BURN ? 'FIXED_ONE_DAI' : s('costBasis') ?? 'OPPORTUNITY';
     raw.acquisitionCostDai = s('acquisitionCostDai');
     raw.lgnsPriceDai = s('lgnsPriceDai');
     raw.lgnsNetSaleDai = s('lgnsNetSaleDai');
@@ -514,6 +514,12 @@ function syncVisibility(f) {
   const form = $('inputs');
   const show = (sel, ok) => form.querySelectorAll(sel).forEach((n) => { n.hidden = !ok(n); });
   show('[data-show]', (n) => n.dataset.show === f.asset);
+  const costSelect = form.elements.costBasis;
+  if (costSelect) {
+    costSelect.disabled = f.asset === 'LGNS' && f.route === ROUTES.ANUBIS_LGNS_BURN;
+    if (costSelect.disabled) costSelect.value = 'FIXED_ONE_DAI';
+    else if (costSelect.value === 'FIXED_ONE_DAI') costSelect.value = 'OPPORTUNITY';
+  }
   show('[data-show-cost]', (n) => n.dataset.showCost === f.costBasis);
   show('[data-show-route]', (n) => n.dataset.showRoute === f.route && (!n.classList.contains('burn-basis') || f.asset === 'LGNS'));
   show('[data-show-fx]', (n) => n.dataset.showFx.split(' ').includes(f['fx.mode']));
@@ -798,6 +804,7 @@ function renderConversion(out) {
   if (c.asset === 'KRW' && c.daiValue !== null) values.push(`<span><small>DAI 환산</small><b>${fmtDai(c.daiValue, 2)}</b></span>`);
   if (c.asset !== 'KRW' && c.krwValue !== null) values.push(`<span><small>원화 환산</small><b>${fmtN(toNum(c.krwValue), 0)}원</b></span>`);
   else if (c.asset === 'DAI') values.push('<span class="muted"><small>원화 환산</small><b>실시간 환율 없음</b></span>');
+  if (out.scenario.route === ROUTES.ANUBIS_LGNS_BURN) values.push(`<span><small>고정 비교 원금 (1 LGNS = 1 DAI)</small><b>${fmtDai(out.quote.economicCostDai, 2)}</b></span>`);
   if (c.asset === 'LGNS' && c.marketValueDai !== null) values.unshift(`<span><small>LGNS 시장 평가액</small><b>${fmtDai(c.marketValueDai, 2)}</b></span>`);
   const state = c.blockedCap0
     ? `<b class="warn">잠재 ${fmtPower(c.potentialPower)} · 활성 0</b><small>${esc(c.powerNote)}</small>`
@@ -822,7 +829,7 @@ function renderQuickSummary(out) {
     : `<tr><th scope="row">${esc(r.label)}</th><td colspan="2">기간 밖</td></tr>`)).join('')}</tbody></table>`
     + `<p class="qs-basis">${esc(quickSummaryBasis(out)?.text ?? '')}</p>`
     + '<p class="qs-basis">현금 수령 전: 받은 금액 0 · 현금 수익률 −100%. 이후 보상으로 원금을 회수하며, 원금은 별도로 반환되지 않습니다.</p>'
-    + (out.scenario.asset === 'LGNS' ? '<details class="roi-explanation"><summary>LGNS 수익률: 소각 배율·한도 제외 가정 확인</summary><p>LGNS도 소각하면 원금 자산이 없어지므로 DAI와 마찬가지로 현금 수령 전 수익률은 −100%입니다. 표는 시작일이 아니라 3·6·12개월까지 받은 현금을 보여줍니다. ROI = (누적 실제 현금 − 총투입) ÷ 총투입입니다.</p><p>현재 모형은 LGNS의 시장 평가액을 원금으로 잡지만, POWER는 시가와 별도로 소각 인정 기준 1 LGNS = 1 DAI에 ×2를 적용합니다. 이 인정액을 원금이나 수령 현금에 더하지 않습니다. 예를 들어 10,000 LGNS의 시가가 약 1,720 DAI이고 배율이 2라면 20,000 POWER로 계산되어 수익률이 크게 나옵니다.</p><p>이 소각 배율의 의미와 가격별 적용 규칙은 미검증이며 소각 한도도 제외한 가정 계산입니다. 실제 투자 수익으로 확정된 값이 아닙니다.</p></details>' : '');
+    + (out.scenario.route === ROUTES.ANUBIS_LGNS_BURN ? '<p class="qs-basis">LGNS 고정 비교 기준: 1 LGNS = 1 DAI 원금 · ×2 POWER. 시장 시세는 수익률 분모에 반영하지 않습니다. 2 POWER는 2 DAI 현금 보장이 아닙니다.</p>' : '');
 }
 
 function renderFeePanel() {
@@ -893,7 +900,7 @@ function renderEntry() {
   }
   const costNote = q.economicCostSource === 'MARKET_VALUE/ASSUMED'
     ? '현재 LGNS 시장평가액 기준(매도세·수수료 전, 매도 견적 아님)'
-    : q.costBasis ? (q.costBasis === 'ACQUISITION' ? '매입원가 기준' : '기회비용(순매도 가능 DAI) 기준') : 'DAI 진입액';
+    : q.costBasis ? (q.costBasis === 'FIXED_ONE_DAI' ? '1 LGNS = 1 DAI 고정 비교 기준' : q.costBasis === 'ACQUISITION' ? '매입원가 기준' : '기회비용(순매도 가능 DAI) 기준') : 'DAI 진입액';
   steps.push(['원금(ROI 분모 진입분)', fmtDai(q.economicCostDai), costNote]);
   if (q.fixed) {
     const fx = result.summary.fixed;

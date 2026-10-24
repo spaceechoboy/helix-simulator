@@ -145,7 +145,10 @@ export function getEntryQuote(scenario, snapshot) {
       q.netSaleDai = v > 0n ? v : 0n; q.netSaleSource = STATUS.ASSUMED;
       warnings.push('LGNS 순매도액은 수동 가정(세금·풀·가스) — 실행 견적 아님');
     } else q.netSaleSource = null;
-    if (s.costBasis === COST_BASIS.ACQUISITION) {
+    if (s.costBasis === COST_BASIS.FIXED_ONE_DAI) {
+      q.economicCostDai = lgns18; q.economicCostSource = 'FIXED_ONE_DAI/ASSUMED';
+      warnings.push('LGNS 원금은 1 LGNS = 1 DAI 고정 비교 기준 — 실제 매입원가·시장가격·현금 보장 아님');
+    } else if (s.costBasis === COST_BASIS.ACQUISITION) {
       q.economicCostDai = s.acquisitionCostDai; q.economicCostSource = 'ACQUISITION';
     } else if (q.netSaleDai !== null) {
       q.economicCostDai = q.netSaleDai; q.economicCostSource = 'NET_SALE';

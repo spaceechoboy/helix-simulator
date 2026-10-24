@@ -453,13 +453,13 @@ test('진입 변환 요약은 관측 cap0을 별도 표시하고 계산 한도 �
   assert.equal(conversionSummary(strict).blockedCap0, true);
 });
 
-test('LGNS 10,000: 현재 시가 원가·cap0 별도 표시·준비금 제안 후 조건부 계산 완료', () => {
+test('LGNS 10,000: 1 DAI 고정 원가·cap0 별도 표시·준비금 제안 후 조건부 계산 완료', () => {
   const out = compute(applySimpleForm(F({ ...EXAMPLE_VALUES, asset: 'LGNS', amount: '10000', lgnsChain: 'anubis', route: 'ANUBIS_LGNS_BURN',
     'market.lgns': 'MANUAL', lgnsPriceDai: '0.5' })), SNAP);
   assert.deepEqual(out.errors, []);
   assert.equal(out.scenario.engine.ignoreBurnCaps, true);
-  assert.equal(out.quote.economicCostDai, 5000n * E18);
-  assert.equal(out.quote.economicCostSource, 'MARKET_VALUE/ASSUMED');
+  assert.equal(out.quote.economicCostDai, 10000n * E18);
+  assert.equal(out.quote.economicCostSource, 'FIXED_ONE_DAI/ASSUMED');
   assert.equal(out.quote.netSaleDai, null);
   assert.equal(out.quote.burnCaps.lgns.value, '0');
   assert.equal(out.result.summary.entryState, 'DONE');
@@ -850,4 +850,14 @@ test('index.html은 외부 CDN 없이 로컬 태그만', () => {
   const html = readFileSync(join(ROOT, 'src/index.html'), 'utf8');
   assert.ok(html.includes('<script type="module" src="./ui.js"></script>'));
   assert.ok(!/(src|href)=["']https?:/i.test(html));
+});
+
+
+test('LGNS 직접 소각: 시가와 무관하게 1 LGNS = 1 DAI 원금', () => {
+ const a = compute(F({ asset: 'LGNS', lgnsChain: 'anubis', amount: '10000', lgnsPriceDai: '0.17', ...EXAMPLE_VALUES }), SNAP);
+ const b = compute(F({ asset: 'LGNS', lgnsChain: 'anubis', amount: '10000', lgnsPriceDai: '0.9', ...EXAMPLE_VALUES }), SNAP);
+ assert.equal(a.quote.economicCostDai, 10000n * 10n ** 18n);
+ assert.equal(a.quote.economicCostDai, b.quote.economicCostDai);
+ assert.equal(a.result.summary.I, b.result.summary.I);
+ assert.equal(a.result.summary.roiBps, b.result.summary.roiBps);
 });

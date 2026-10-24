@@ -45,9 +45,9 @@
 
     <div id="input-equivalent" class="input-equivalent" aria-live="polite" hidden></div>
     <div class="burn-basis" data-show-route="ANUBIS_LGNS_BURN" hidden>
-      <small>LGNS 소각 인정 기준 · 계산 가정</small>
+      <small>LGNS 고정 원금 기준 · 계산 가정</small>
       <b>1 LGNS = 1 DAI <span>×2</span> → 2 POWER</b>
-      <p>소각한 LGNS는 없어집니다. 위의 1 DAI는 POWER 계산용 인정액이며, 현재 시장가격이나 돌려받는 원금이 아닙니다.</p>
+      <p>원금과 수익률은 1 LGNS = 1 DAI로 고정하여 비교합니다. 소각한 LGNS는 없어지며, ×2는 POWER 배율이지 2 DAI 현금 보장이 아닙니다.</p>
     </div>
     <input type="hidden" name="market.fx" value="AUTO">
     <input type="hidden" name="funding" value="SELF">
@@ -128,11 +128,11 @@
         <label data-show-lgns-manual>LGNS 시장 가격 (DAI/LGNS, 직접 입력)<input name="lgnsPriceDai" inputmode="decimal" placeholder="미입력 = 평가 불가"></label>
         <label>순매도 견적 (DAI, 총액·수동 quote)<input name="lgnsNetSaleDai" inputmode="decimal" placeholder="미입력 = 순매도액 미확정"></label>
         <p class="hint">직접 받은 매도 견적(세금·풀 수수료·가스 차감 후)을 넣습니다. 비우면 미확정이며 시장가로 대신하지 않습니다.</p>
-        <label>원가 기준<select name="costBasis">
+        <label>원가 기준<select name="costBasis"><option value="FIXED_ONE_DAI" disabled>고정 비교 원금 (1 LGNS = 1 DAI)</option>
           <option value="OPPORTUNITY">기회비용(직접 소각은 현재 시가)</option>
           <option value="ACQUISITION">매입원가</option>
         </select></label>
-        <p class="hint">Anubis 직접 소각은 현재 LGNS 시장평가액(매도세·수수료 전)을 원가로 씁니다. 매도 경로는 순매도 견적이 필요합니다.</p>
+        <p class="hint">Anubis 직접 소각은 1 LGNS = 1 DAI 고정 비교 원금을 씁니다. 실제 시장가격은 참고용입니다. 매도 경로는 순매도 견적이 필요합니다.</p>
         <label data-show-cost="ACQUISITION">매입원가 (DAI)<input name="acquisitionCostDai" inputmode="decimal"></label>
 
         <div data-show-route="POLYGON_FIXED" class="sub-block" id="fixed-block">
