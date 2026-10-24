@@ -1,0 +1,9 @@
+{
+  "note": "이전 단순모형(가정모드 전용, 실행 불가). 1,000 DAI, P0=2,500, r=1.02/365, fee_t=.025, sell=.03, pool/gas/lag/float=0, c=.915, k=2.35824742268. 설계 1463.815984와 지시 1463.816025는 0.01 허용오차 내 동일 취급.",
+  "toleranceDai": 0.01,
+  "cases": [
+    { "name": "n0/365 즉시 현금화", "horizonDays": 365, "policy": { "recycleBps": 0 }, "expectedW": 1463.816 },
+    { "name": "n167/365", "horizonDays": 365, "policy": { "switchDay": 167 }, "expectedW": 1832.020193 },
+    { "name": "n532/730", "horizonDays": 730, "policy": { "switchDay": 532 }, "expectedW": 7302.443541 }
+  ]
+}

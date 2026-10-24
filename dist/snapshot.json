@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "helix-sim-evidence/1",
+  "mode": "SAVED",
+  "provenance": {
+    "source": "../helix-simulator-design-2026-10-23/live-evidence-2026-10-23.json (공개 RPC eth_call + dApp GET 응답 발췌)",
+    "copiedBy": "claude-opus-5-5, 2026-10-23",
+    "checksum": null,
+    "checksumNote": "SUSPECT: Bash 없음으로 미계산. build 단계에서 sha256 계산 예정.",
+    "blockHash": null,
+    "blockHashNote": "원본 증거에 block hash 없음 — 블록 번호만 기록",
+    "statusPolicy": "모든 값 OBSERVED/ASSUMED. 자동 LIVE_VERIFIED 금지. 사용 시 src/data.js snapshotFromEvidence(rawEvidence)로 변환."
+  },
+  "rawEvidence": {
+    "fetchedAt": "2026-10-23T08:53:08.057254+00:00",
+    "block": 17213594,
+    "rpc": "https://rpc4.anubispace.org",
+    "chain": {
+      "powerRateBps": {"address": "0x9E68F61E2615cc1D2C4a2D0026bFc1EBFdf68C1b", "selector": "0xbe7f8c68", "integer": "25000"},
+      "annualRateBps_unnamedGetter": {"address": "0x9E68F61E2615cc1D2C4a2D0026bFc1EBFdf68C1b", "selector": "0xf6d2c12b", "integer": "10200"},
+      "lgnsPowerRate": {"address": "0x9E68F61E2615cc1D2C4a2D0026bFc1EBFdf68C1b", "selector": "0x3498100a", "integer": "2000000000000000000"},
+      "ailgnsTwapRateBps": {"address": "0x9E68F61E2615cc1D2C4a2D0026bFc1EBFdf68C1b", "selector": "0x1738c265", "integer": "25000"},
+      "dailyBurnPowerCap": {"address": "0x9E68F61E2615cc1D2C4a2D0026bFc1EBFdf68C1b", "selector": "0x5fad1fe4", "integer": "0"},
+      "dailyAilgnsBurnPowerCap": {"address": "0x9E68F61E2615cc1D2C4a2D0026bFc1EBFdf68C1b", "selector": "0xb2517e4e", "integer": "250000000000000000000000"},
+      "dailyDaiPowerCap": {"address": "0x9E68F61E2615cc1D2C4a2D0026bFc1EBFdf68C1b", "selector": "0x30928d3e", "integer": "18000000000000000000000000"},
+      "depositsOpen": {"address": "0x9E68F61E2615cc1D2C4a2D0026bFc1EBFdf68C1b", "selector": "0x549c4627", "integer": "1"},
+      "turbineFeeBps": {"address": "0xE884A336550a4482Ca6A17A3F93aa30Ed4eD9BaD", "selector": "0x24a9d853", "integer": "250"},
+      "lockSeconds": {"address": "0xE884A336550a4482Ca6A17A3F93aa30Ed4eD9BaD", "selector": "0xbfa6fddb", "integer": "86400"},
+      "totalSellFeeBps": {"address": "0x256EdB652db43E721EC6A12B6b51b6967D3bb8cB", "selector": "0xfd6d5ad8", "integer": "300"},
+      "lastTwapPrice": {"address": "0x732e959fED889626686f9Fbe57233FE32b771963", "selector": "0x45edac75", "integer": "803029429227305973918"}
+    },
+    "api": {
+      "protocol": {"sample": {
+        "fees": {"sellFeeBps": 300, "turbineFeeBps": 250, "turbineLockSeconds": 86400},
+        "clock": {"currentDay": 26, "dayStart": 1792684800, "dayEnd": 1792771200, "genesis": 1790524800, "daySeconds": 86400, "epochDays": 7},
+        "contracts": {"DAI_ADDRESS": "0x83fd06F0846d9D90B3016bF670Efe2E0B11cDe14", "AILGNS_ADDRESS": "0x256EdB652db43E721EC6A12B6b51b6967D3bb8cB", "AILGNS_DAI_PAIR": "0x0a1Cce65d995C6C5100e6F5bA3c388Ef34CEcaf0", "POWER_LEDGER_ADDRESS": "0x9E68F61E2615cc1D2C4a2D0026bFc1EBFdf68C1b", "TURBINE_ADDRESS": "0xE884A336550a4482Ca6A17A3F93aa30Ed4eD9BaD", "ORACLE_ADDRESS": "0x732e959fED889626686f9Fbe57233FE32b771963", "ROUTER_ADDRESS": "0x3E412E02B6157fBE80b6C6697f3Ce1142E629019"}
+      }},
+      "power": {"sample": {"day": 26, "totalActivePower": "164562840.814153323247820380", "totalPower": "181019036.090316904647972392", "participants": 36863}},
+      "emission": {"sample": {
+        "clock": {"currentDay": 26, "currentEpoch": 4, "dayStart": 1792684800, "dayEnd": 1792771200},
+        "community": {"budgetToday": "31500.0", "actualToday": null, "lastSettledDay": 25},
+        "factor": {"day": 26, "factorBps": 3000, "riskLevel": 3, "emergency": false}
+      }}
+    }
+  }
+}

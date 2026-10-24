@@ -1,0 +1,11 @@
+{
+  "name": "helix-simulator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "HELIX 개인 현금흐름 시뮬레이터 (로컬 단일 HTML)",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "build": "node build.mjs"
+  }
+}

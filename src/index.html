@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HELIX 계산기</title>
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<div class="page">
+<header class="top">
+  <h1>HELIX 계산기</h1>
+  <p class="sub">금액을 넣고, 기간별 수령액을 확인하세요.</p>
+  <details class="source-disclosure"><summary>데이터 기준 확인</summary>
+  <div id="data-bar" class="data-bar" aria-label="기준 데이터">
+    <span id="data-status" class="data-status">데이터 불러오는 중</span>
+    <button type="button" id="btn-live" class="link">새로 조회</button>
+    <button type="button" id="btn-apply" class="primary small" disabled hidden>이 값으로 다시 계산</button>
+    <div id="data-pending" class="data-pending" aria-live="polite"></div>
+    <details id="d-data" class="data-more">
+      <summary>데이터 상세</summary>
+      <div id="data-detail"></div>
+      <label class="inline"><input type="checkbox" id="auto-live"> 60초마다 자동 조회(화면이 보일 때만)</label>
+    </details>
+  </div>
+  </details>
+</header>
+
+<main class="layout">
+  <form id="inputs" class="card inputs" novalidate autocomplete="off">
+    <div class="field">
+      <span class="field-label" id="lbl-asset">시작 자산</span>
+      <div class="seg" role="radiogroup" aria-labelledby="lbl-asset">
+        <label><input type="radio" name="assetGroup" value="cash" checked> DAI·원화</label>
+        <label><input type="radio" name="assetGroup" value="LGNS"> LGNS</label>
+      </div>
+      <input type="hidden" name="asset" value="DAI">
+      <div class="seg seg-sm" role="radiogroup" aria-label="입력 통화" data-show-group="cash">
+        <label><input type="radio" name="currency" value="DAI" checked> DAI</label>
+        <label><input type="radio" name="currency" value="KRW"> 원화</label>
+      </div>
+    </div>
+    <label class="field">금액 <span class="unit" id="amount-unit">DAI</span>
+      <input name="amount" inputmode="decimal" value="1000" class="big-input"></label>
+
+    <div class="burn-basis" data-show-route="ANUBIS_LGNS_BURN" hidden>
+      <small>LGNS 소각 인정 기준 · 계산 가정</small>
+      <b>1 LGNS = 1 DAI <span>×2</span> → 2 POWER</b>
+      <p>소각한 LGNS는 없어집니다. 위의 1 DAI는 POWER 계산용 인정액이며, 현재 시장가격이나 돌려받는 원금이 아닙니다.</p>
+    </div>
+    <input type="hidden" name="market.fx" value="AUTO">
+    <input type="hidden" name="funding" value="SELF">
+    <input type="hidden" name="usage" value="sell">
+    <input type="hidden" name="policyType" value="ratio">
+    <input type="hidden" name="recyclePct" value="0">
+    <input type="hidden" name="switchDay" value="0">
+
+
+
+    <div id="market-strip" class="market-strip" aria-label="시장 시세" aria-live="polite"></div>
+    <details id="input-details" class="input-details"><summary>환산·시세·운전자금 설정</summary>
+    <div id="conversion-summary" class="conversion-summary" aria-live="polite" aria-label="금액 환산과 POWER"></div>
+    <div data-show="LGNS">
+      <label class="field">LGNS가 있는 체인<select name="lgnsChain">
+        <option value="anubis" selected>Anubis</option>
+        <option value="polygon">Polygon</option>
+      </select></label>
+      <div id="lgns-status" class="notice" aria-live="polite"></div>
+    </div>
+
+    <div class="reserve-mode-row">
+      <span id="lbl-reserve-mode">운전자금</span>
+      <div class="seg seg-sm" role="radiogroup" aria-labelledby="lbl-reserve-mode">
+        <label><input type="radio" name="reserveMode" value="AUTO" checked> 자동</label>
+        <label><input type="radio" name="reserveMode" value="MANUAL"> 직접</label>
+      </div>
+    </div>
+    <p id="example-line" class="example-line" aria-live="polite"></p>
+
+
+    <div id="fee-panel" class="fee-panel" aria-label="계산 수수료"></div>
+
+    <details id="settings" class="settings">
+      <summary>세부 설정</summary>
+
+      <h3>시세 사용</h3>
+      <p class="hint">DAI/원화 환율은 Anubis DAI/USDT × 업비트 USDT/KRW 자동 조회만 사용합니다. 조회되지 않으면 원화 계산을 만들지 않습니다.</p>
+      <label>AiLGNS 가격<select name="market.ailgns">
+        <option value="AUTO" selected>실시간 (Anubis 풀 spot)</option>
+        <option value="SNAPSHOT">저장된 Oracle TWAP</option>
+        <option value="MANUAL">직접 입력</option>
+      </select></label>
+      <label data-show-ail-manual>AiLGNS 가격 (DAI)<input name="engine.priceDaiPerAilgns" inputmode="decimal"></label>
+      <label>LGNS 가격<select name="market.lgns">
+        <option value="AUTO" selected>실시간 (선택 체인 풀 spot)</option>
+        <option value="MANUAL">직접 입력</option>
+      </select></label>
+      <p class="hint">실시간 값은 새로고침해도 직접 입력한 값을 지우지 않습니다. 계산은 현재 값을 미래에도 고정해 씁니다(가격 예측 없음).</p>
+
+      <h3>준비금</h3>
+      <p class="hint">기본 자동 모드는 20 DAI에서 시작해 현재 매일 받기 경로와 선택 기간이 완료되는 값을 조건부로 찾습니다. 전체 전략과 운전자금을 함께 최적화하는 값은 아닙니다.</p>
+      <label>운전자금 (DAI, 진입액과 별도 · 수정하면 직접 모드)<input name="reserveDai" inputmode="decimal" value="0"></label>
+      <label>Anubis 가스 보유 (DAI)<input name="gas.anubisNativeDai" inputmode="decimal" value="1"></label>
+      <label>Polygon 가스 보유 (DAI 환산)<input name="gas.polygonNativeDai" inputmode="decimal" value="0.5"></label>
+      <label class="inline"><input type="checkbox" name="gas.autoRefillFromCash" checked> 가스도 내부 DAI에서 보충 <span class="req">환전·가스비는 모형 가정</span></label>
+      <div class="actions">
+        <button type="button" id="btn-minreserve">필요 운전자금 계산</button>
+        <button type="button" id="btn-example">예시 조건 다시 적용</button>
+      </div>
+      <p class="hint">예시 조건: 운전자금 20 DAI · Anubis 가스 40 DAI · 가스 부족 시 내부 DAI에서 보충 · 터빈 즉시 수령 5000bps(산출 2Q 중 Q 즉시, Q는 24시간 잠금).
+        가스 40은 측정한 필요액이 아니며, 내부 보충의 환전·가스비도 모형 가정입니다. 외부 입금으로 채우지 않습니다.</p>
+      <div id="minreserve-out" class="data-pending" aria-live="polite"></div>
+      <label>총 초기예산 (DAI, 비교 기준)<input name="totalBudgetDai" inputmode="decimal" placeholder="빈 칸 = 원금+준비금 합으로 고정"></label>
+      <p class="hint" id="budget-hint"></p>
+
+      <h3>날짜와 기간</h3>
+      <label>시작 날짜 (KST)<input name="startDate" type="date"></label>
+      <label>기간 기준<select name="periodMode">
+        <option value="CALENDAR">달력 3·6·12개월</option>
+        <option value="FIXED_DAYS">90·180·365일</option>
+      </select></label>
+
+      <div data-show="LGNS" id="lgns-settings">
+        <h3>LGNS 경로와 원가</h3>
+        <label>경로<select name="route"></select></label>
+        <p class="hint" id="route-hint"></p>
+        <label data-show-lgns-manual>LGNS 시장 가격 (DAI/LGNS, 직접 입력)<input name="lgnsPriceDai" inputmode="decimal" placeholder="미입력 = 평가 불가"></label>
+        <label>순매도 견적 (DAI, 총액·수동 quote)<input name="lgnsNetSaleDai" inputmode="decimal" placeholder="미입력 = 순매도액 미확정"></label>
+        <p class="hint">직접 받은 매도 견적(세금·풀 수수료·가스 차감 후)을 넣습니다. 비우면 미확정이며 시장가로 대신하지 않습니다.</p>
+        <label>원가 기준<select name="costBasis">
+          <option value="OPPORTUNITY">기회비용(직접 소각은 현재 시가)</option>
+          <option value="ACQUISITION">매입원가</option>
+        </select></label>
+        <p class="hint">Anubis 직접 소각은 현재 LGNS 시장평가액(매도세·수수료 전)을 원가로 씁니다. 매도 경로는 순매도 견적이 필요합니다.</p>
+        <label data-show-cost="ACQUISITION">매입원가 (DAI)<input name="acquisitionCostDai" inputmode="decimal"></label>
+
+        <div data-show-route="POLYGON_FIXED" class="sub-block" id="fixed-block">
+          <h3>FIXED 값 (Polygon 소각 → Anubis LGNS 지급)</h3>
+          <p class="hint warn-text">오늘 개방·지급·편입이 검증되지 않았습니다. 빈 칸은 검증대기로 남고 지급을 계산하지 않습니다.</p>
+          <label>인정액 (DAI/LGNS, 지급 계산용·원금 아님)<input name="fixed.recognizedDaiPerLgns" inputmode="decimal"></label>
+          <label>총 지급상한 (bps, 인정액 대비)<input name="fixed.totalPayoutCapBps" inputmode="decimal"></label>
+          <label>주기별 지급률 (bps, 소수 가능 예: 33.34)<input name="fixed.payoutBpsPerPeriod" inputmode="decimal"></label>
+          <label>지급 주기 (시간)<input name="fixed.periodHours" inputmode="decimal"></label>
+          <label>지급 가격 (DAI/LGNS)<input name="fixed.payoutPriceDai" inputmode="decimal"></label>
+          <label>지급 가격 출처<input name="fixed.payoutPriceSource"></label>
+          <label>지급 중단일 (시나리오)<input name="fixed.stopDate" type="date"></label>
+        </div>
+      </div>
+
+      <h3>가격·수수료·지연</h3>
+      <p class="hint">빈 칸은 저장 데이터 값을 씁니다.</p>
+      <label>연 배출률 (bps)<input name="engine.annualRateBps" inputmode="numeric" placeholder="저장 데이터 값"></label>
+      <label>터빈 수수료 (bps)<input name="engine.turbineFeeBps" inputmode="numeric" placeholder="저장 데이터 값"></label>
+      <label>AiLGNS 매도세 (bps)<input name="engine.sellTaxBps" inputmode="numeric" placeholder="저장 데이터 값"></label>
+      <label>가격 모형<select name="priceModel">
+        <option value="LINEAR">선형 (가격 고정 가정)</option>
+        <option value="AMM_DAILY_RESET">AMM 일별 재구성</option>
+      </select></label>
+      <label>풀 깊이 (DAI, AMM용)<input name="engine.poolDepthDai" inputmode="decimal"></label>
+      <label>풀 수수료 (bps, 미검증 가정)<input name="engine.poolFeeBps" inputmode="numeric" value="30"></label>
+      <label class="inline"><input type="checkbox" name="engine.feeIncludedInQuote"> 풀 수수료가 견적에 포함됨</label>
+      <label>진입 편입 지연 (일)<input name="engine.entryLagDays" inputmode="numeric" value="1"></label>
+      <label>재소각 편입 지연 (일)<input name="engine.reburnLagDays" inputmode="numeric" value="1"></label>
+      <label>터빈 즉시 수령 비율 (bps)<input name="engine.immediateBps" inputmode="numeric" value="0"></label>
+      <label class="inline"><input type="checkbox" name="engine.ignoreBurnCaps" checked> 계산에서는 LGNS·AiLGNS 소각 한도 제외</label>
+      <p class="hint warn-text">현재 관측 한도는 위에 별도 표시합니다. 이 체크는 미래 계산 가정이며 현재 소각·실거래 가능을 뜻하지 않습니다.</p>
+      <label>LGNS 소각 재개일 (경과일, 시나리오)<input name="engine.lgnsBurnOpenFromDay" inputmode="numeric" placeholder="선택 시 지정일부터 소각 가정"></label>
+      <label class="inline"><input type="checkbox" name="engine.allowPartialActivation"> 분할 활성화 허용 (미검증)</label>
+      <label class="inline"><input type="checkbox" name="engine.returnCashAtEnd" checked> 마지막 날 내부 DAI 돌려받기</label>
+    </details>
+    </details>
+  </form>
+
+  <div class="results">
+    <section class="card results-summary"><h2>기간별 수령액과 수익률</h2>
+    <div id="quick-summary" class="quick-summary" aria-live="polite" aria-label="3·6·12개월 매일 받기 비교 기준"></div>
+    </section>
+    <div id="input-errors" class="errors" role="alert" aria-live="assertive"></div>
+
+    <section class="card" aria-label="그래프">
+      <h2>현금 회수와 POWER 변화</h2>
+      <p id="chart-status" class="chart-status" role="status"></p>
+      <div id="charts" class="charts"></div>
+      <p class="hint">점선은 받은 보상의 누적 평가액, 실선은 실제 받은 현금입니다. POWER는 오른쪽 축을 쓰므로 선의 교차점이 원금 회수일은 아닙니다.</p>
+      <details class="chart-readout"><summary>선택 날짜의 상세 수치</summary><div id="readout" class="readout" aria-live="polite"></div></details>
+      <div class="chart-tools">
+        <span class="hint">마우스를 올려 수치 확인 · 터치 또는 Enter로 날짜 고정 · ←→ 이동 · Esc 해제</span>
+      </div>
+      <div id="detail" class="detail" hidden></div>
+    </section>
+
+    <section id="compare" class="card strategy" aria-label="최대 효율 계산하기">
+      <h2>최대 효율 계산하기</h2>
+      <div class="field period-field">
+        <span class="field-label" id="lbl-period">결과를 볼 기간</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-period">
+          <label><input type="radio" name="horizonYears" value="0.5" form="inputs"> 6개월</label>
+          <label><input type="radio" name="horizonYears" value="1" form="inputs" checked> 1년</label>
+          <label><input type="radio" name="horizonYears" value="2" form="inputs"> 2년</label>
+          <label><input type="radio" name="horizonYears" value="3" form="inputs"> 3년</label>
+        </div>
+      </div>
+      <div id="compare-body"></div>
+    </section>
+
+    <details class="card disclosure"><summary>대표 일자별 수령액</summary><section id="day-samples" aria-label="대표 일자별 장부"></section></details>
+    <details class="card disclosure"><summary>전체 기간 결과·원금 회수 설명</summary>
+    <section id="kpi" class="card kpi" aria-label="핵심 결과"></section>
+    <section id="milestones" class="card" aria-label="3·6·12개월"></section>
+    </details>
+
+    <details class="card more"><summary>계산 근거·고지·내보내기</summary>
+      <details id="d-entry"><summary>진입 과정</summary><div id="entry"></div></details>
+      <details id="d-unreal"><summary>끝날 때 남는 잔액(현금 아님)</summary><div id="unrealized"></div></details>
+      <details id="d-warn"><summary id="warn-summary">가정과 경고</summary><div id="warnings"></div></details>
+      <details id="d-src"><summary>출처와 저장 데이터 값</summary><div id="sources"></div></details>
+      <details id="d-ledger"><summary>일별 장부</summary><div id="ledger"></div></details>
+      <details id="d-log"><summary>입력 변경 기록</summary><ol id="changelog"></ol></details>
+      <div class="actions">
+        <button type="button" id="btn-json">JSON 내보내기</button>
+        <button type="button" id="btn-csv">CSV 내보내기</button>
+      </div>
+    </details>
+  </div>
+</main>
+<footer class="disclaimer">현재 조건을 유지한 가정 계산 · 투자 권유가 아닙니다.<details><summary>유의사항</summary>선택 기간은 만기·환불일이 아니며, POWER는 정산마다 줄고 정수 절삭·수수료·실제 한도 때문에 배출이 멈출 수 있습니다.</details></footer>
+</div>
+<script type="module" src="./ui.js"></script>
+</body>
+</html>
