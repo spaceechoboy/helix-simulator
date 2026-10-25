@@ -72,6 +72,11 @@ const inlineSafe = (s) => s.replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, 
 export function build() {
   let html = readFileSync(join(SRC, 'index.html'), 'utf8');
   const css = readFileSync(join(SRC, 'styles.css'), 'utf8');
+  // Embed the approved official symbol for both header and favicon, preserving single-file portability.
+  for (const [name, mime] of [['symbol-anubis.webp', 'image/webp']]) {
+    const uri = `data:${mime};base64,${readFileSync(join(SRC, 'assets/brand', name)).toString('base64')}`;
+    html = html.replaceAll(`./assets/brand/${name}`, uri);
+  }
   const app = bundle(join(SRC, 'ui.js'));
 
   const workerPath = join(SRC, 'optimizer.worker.js');

@@ -369,3 +369,10 @@ button.link,button.small,.data-more summary,.source-disclosure summary{min-heigh
 @media(max-width:1119px) and (min-width:768px){.layout{grid-template-columns:280px minmax(0,1fr);gap:16px}.card{padding:16px}}
 @media(max-width:767px){.brand-bar{padding:10px 16px}.brand-bar small{display:none}.page{padding:0 12px 28px}.top{padding:10px 0 8px;margin:0}.top h1{font-size:1.1rem}.top .sub{display:none}.validation-note{font-size:11px}.layout{display:flex;flex-direction:column;gap:12px}.results{display:contents}.layout>* ,.results>*{width:100%}.card{padding:14px}.inputs{gap:6px}.inputs .seg label,.inputs .seg-sm label{min-height:44px}.inputs .field-label{font-size:.75rem}.inputs .big-input{min-height:46px;font-size:1.4rem!important}.data-bar{font-size:.7rem;gap:2px 8px}.data-pending{font-size:.67rem}.data-more summary{min-height:32px}.source-disclosure{margin:0}.quick-summary .qs td b{font-size:1rem}.quick-summary .qs td:last-child{font-size:.95rem}.qs th,.qs td{padding:6px 3px}.qs-basis{font-size:.68rem}.chart-controls{gap:8px}.chart figcaption{gap:8px}.chart .legend{font-size:.72rem}.market-list li{padding:10px 0}.input-details{font-size:.85rem}.strategy-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+/* Approved official symbol; existing UI font retained (no private font copied). */
+.brand-lockup{display:inline-flex;align-items:center;gap:9px;flex-shrink:0}
+.brand-lockup img{display:block;width:30px;height:30px;object-fit:contain}
+.brand-wordmark{font-size:1.0625rem;line-height:1;font-weight:800;letter-spacing:-.02em;white-space:nowrap;color:white}
+.brand-block{display:inline-block;width:7px;height:11px;margin-left:7px;background:#9be356}
+@media(max-width:767px){.brand-bar{padding-top:7px;padding-bottom:7px}}
