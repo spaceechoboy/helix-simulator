@@ -232,7 +232,9 @@ export function simulate(scenario, snapshot, policy, opts = {}) {
       if (P.lgnsPowerPerLgns === null) warnings.push('LGNS→Power 비율 없음');
       else if (payGas('anubis', ['approve', 'burn'], rec)) {
         const pw = wmul(rescale(S.lgnsWaiting, 9, 18), P.lgnsPowerPerLgns);
-        S.pending.push({ amount: pw, eligibleAt: t + P.reburnLagDays * DS, route: 'lgnsBurn' });
+        // ANUBIS_LGNS_BURN: 대기 LGNS는 초기 진입분뿐 → 진입 지연(entryLagDays). FIXED 지급 LGNS 소각은 재소각 지연 유지.
+        const lag = scenario.route === ROUTES.ANUBIS_LGNS_BURN ? P.entryLagDays : P.reburnLagDays;
+        S.pending.push({ amount: pw, eligibleAt: t + lag * DS, route: 'lgnsBurn' });
         ev(d, 'HELIX_LGNS_BURN', { lgns: S.lgnsWaiting, power: pw }); S.lgnsBurned += S.lgnsWaiting; S.lgnsWaiting = 0n;
       }
     }
@@ -418,15 +420,24 @@ const wad25 = 25n * WAD / 10n;
 
 /**
  * 최소 운전자금 탐색(R1, R4). 성공 = strict 실행에서 전체 활성화 완료.
- * 예산 = totalBudgetDai - 진입원가 - 가스. 예산 내 성공 없으면 INSUFFICIENT_BUDGET(0 성공 처리 금지).
+ * 예산 = totalBudgetDai - (simulate 초기자본 I0 중 reserve 외 항목: 진입원가+Anubis 가스+FIXED Polygon 가스+기존 AiLGNS 원가).
+ * 각 후보도 실제 initialCapitalDai ≤ 총예산이어야 성공. 예산 내 성공 없으면 INSUFFICIENT_BUDGET(0 성공 처리 금지).
  */
 export function findMinReserve(scenario, snapshot, policy, { stepDai = 10n ** 16n, samples = 8 } = {}) {
   const q = getEntryQuote(scenario, snapshot);
   if (scenario.totalBudgetDai === null) throw new Error('총 초기예산 필수');
-  if (q.economicCostDai === null) return { status: 'COST_UNKNOWN' };
-  const hi = scenario.totalBudgetDai - q.economicCostDai - scenario.engine.gas.anubisNativeDai;
+  const e = scenario.engine;
+  if (q.economicCostDai === null || (e.initialAilgns && e.initialAilgnsCostDai === null)) return { status: 'COST_UNKNOWN' };
+  const polygonGas = scenario.route === ROUTES.POLYGON_FIXED ? e.gas.polygonNativeDai : 0n;
+  const fixedCost = q.economicCostDai + e.gas.anubisNativeDai + polygonGas + (e.initialAilgnsCostDai ?? 0n);
+  const hi = scenario.totalBudgetDai - fixedCost;
   if (hi < 0n) return { status: 'INSUFFICIENT_BUDGET', maxReserve: hi };
-  const ok = (x) => { const r = simulate({ ...scenario, reserveDai: x }, snapshot, policy, { strict: true }); return { pass: r.summary.completed, failed: r.failed }; };
+  const ok = (x) => {
+    const r = simulate({ ...scenario, reserveDai: x }, snapshot, policy, { strict: true });
+    const cap = r.summary.initialCapitalDai;
+    if (cap === null || cap > scenario.totalBudgetDai) return { pass: false, failed: { day: null, reason: 'OVER_BUDGET', initialCapitalDai: cap } };
+    return { pass: r.summary.completed, failed: r.failed };
+  };
   const top = ok(hi);
   const STRUCTURAL = ['ENTRY_BLOCKED', 'ENTRY_NOT_EXECUTED', 'LGNS_BURN_PENDING', 'FIXED_UNVERIFIED', 'INVARIANT'];
   if (!top.pass) return { status: STRUCTURAL.includes(top.failed?.reason) ? 'NOT_EXECUTABLE' : 'INSUFFICIENT_BUDGET', maxReserve: hi, failed: top.failed };

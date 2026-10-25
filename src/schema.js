@@ -225,6 +225,9 @@ export function normalizeInput(raw = {}) {
   if (fixed?.stopDate && !isValidDate(fixed.stopDate)) errors.push('fixed.stopDate 날짜 오류');
   if (fixed?.periodSeconds !== null && fixed?.periodSeconds !== undefined && !(fixed.periodSeconds > 0)) errors.push('fixed.periodSeconds 양수');
   const engine = normalizeEngineOptions(raw.engine ?? {}, errors);
+  for (const key of ['entryLagDays', 'reburnLagDays']) if (!Number.isSafeInteger(engine[key]) || engine[key] < 0) errors.push(`${key}: 0 이상 정수 필수`);
+  if (engine.reburnLagDays < 1) errors.push('재소각 편입 지연은 1일 이상이어야 합니다(정산 후 소각).');
+  if (route === ROUTES.ANUBIS_LGNS_BURN && engine.entryLagDays < 1) errors.push('LGNS 소각 진입 편입 지연은 1일 이상이어야 합니다(정산 후 소각).');
 
   if (errors.length) { const e = new Error('입력 오류: ' + errors.join('; ')); e.name = 'InputError'; e.errors = errors; throw e; }
 

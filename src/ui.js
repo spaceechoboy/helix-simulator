@@ -1,3 +1,4 @@
+import { PROTOCOL_BASELINE } from './protocol-baseline.js';
 import { TOKEN_ICONS } from './token-icons.js';
 // 화면 계층. DESIGN §2 화면 순서 A~H, §6 현금 성과, §7 마일스톤, §8 최적화 hook, §14 R5, §15.
 // 계산은 engine.simulate 단일 장부만 사용한다. 표·그래프·내보내기는 같은 result에서 읽는다.
@@ -5,7 +6,7 @@ import { formatUnits, toDisplayNumber, wmul, wdiv } from './decimal.js';
 import { normalizeInput, ROUTES, CHAINS, FUNDING } from './schema.js';
 import { getEntryQuote } from './quotes.js';
 import { simulate, findMinReserve } from './engine.js';
-import { snapshotFromEvidence, validateSnapshot, refreshLive } from './data.js';
+import { snapshotFromEvidence, validateSnapshot, refreshLive, liveCalculationErrors, acceptLiveSnapshot } from './data.js';
 import { horizonDays, kstDate, daysBetween } from './dates.js';
 import { createSyncedCharts } from './charts.js';
 import { optimize, createOptimizerClient, OPTIMIZER_PROTOCOL } from './strategies.js';
@@ -188,7 +189,7 @@ export function reserveSummary(f) {
 /**
  * 시세 모드 적용. 모드 필드: market.fx(AUTO/MANUAL), market.ailgns(AUTO/SNAPSHOT/MANUAL), market.lgns(AUTO/MANUAL).
  * 모드 필드가 없으면(이전 계약) 폼 값을 그대로 쓴다. AUTO 값은 같은 폼 필드에 10진 문자열로 넣어 수동 경로와 같은 정규화를 거친다.
- * AUTO 원화 시세가 없으면 원화 계산을 막는다(수동값으로 몰래 대체하지 않음). AiLGNS AUTO 실패는 저장 TWAP을 쓰고 그 사실을 표시.
+ * AUTO 원화 시세가 없으면 원화 계산을 막는다(수동값으로 몰래 대체하지 않음). AiLGNS AUTO 실패는 계산을 중단하며 저장 TWAP으로 대체하지 않는다.
  */
 export function applyMarket(f, market, nowMs = Date.now()) {
   const g = { ...f }, errors = [], use = {};
@@ -205,14 +206,14 @@ export function applyMarket(f, market, nowMs = Date.now()) {
         components: { daiUsdt: { value: legs.daiUsdt.value, unit: 'USDT/DAI', blockNumber: legs.daiUsdt.source?.blockNumber ?? null, pair: legs.daiUsdt.source?.pair ?? null },
           usdtKrw: { value: legs.upbit.value, unit: 'KRW/USDT', market: legs.upbit.source?.market ?? null, tickerTimestamp: legs.upbit.source?.tickerTimestamp ?? null } } };
     } else {
-      if (g.asset === 'KRW') errors.push(market?.loading ? '원화 환율을 불러오는 중입니다.' : '실시간 DAI/KRW 시세를 가져오지 못해 원화 계산을 할 수 없습니다. 잠시 뒤 새로 조회하세요.');
+      if (g.asset === 'KRW' || f.requireLive) errors.push(market?.loading ? '원화 환율을 불러오는 중입니다.' : '최신 DAI/KRW 환율을 조회해야 계산할 수 있습니다. 잠시 뒤 새로 조회하세요.');
       g['fx.mode'] = ''; g['fx.daiKrw'] = ''; g['fx.daiUsd'] = ''; g['fx.usdKrw'] = '';
       use.fx = { mode: 'AUTO', status: 'UNAVAILABLE', error: legs.fx?.error ?? (market?.loading ? 'loading' : '시세 없음') };
     }
   } else if (g.asset === 'KRW') use.fx = { mode: fxMode ?? 'FORM', status: 'MANUAL' };
   if (ailMode === 'AUTO') {
     if (usableLeg(legs.ailgns, nowMs)) { g['engine.priceDaiPerAilgns'] = formatUnits(BigInt(legs.ailgns.value), 18); use.ailgns = { mode: 'AUTO', source: 'SPOT', value: legs.ailgns.value, fetchedAt: legs.ailgns.fetchedAt, blockNumber: legs.ailgns.source?.blockNumber ?? null }; }
-    else { g['engine.priceDaiPerAilgns'] = ''; use.ailgns = { mode: 'AUTO', source: 'SAVED_TWAP', note: '실시간 spot 없음 — 저장된 Oracle TWAP 사용' }; }
+    else { g['engine.priceDaiPerAilgns'] = ''; use.ailgns = { mode: 'AUTO', source: 'UNAVAILABLE' }; errors.push('최신 AiLGNS 시세를 조회해야 계산할 수 있습니다. 저장 TWAP으로 대체하지 않습니다.'); }
   } else if (ailMode === 'SNAPSHOT') { g['engine.priceDaiPerAilgns'] = ''; use.ailgns = { mode: 'SNAPSHOT', source: 'SAVED_TWAP' }; }
   else if (ailMode === 'MANUAL') {
     if (!String(f['engine.priceDaiPerAilgns'] ?? '').trim()) errors.push('AiLGNS 가격을 직접 입력하거나 ‘실시간’으로 바꾸세요.');
@@ -221,7 +222,7 @@ export function applyMarket(f, market, nowMs = Date.now()) {
   if (g.asset === 'LGNS' && lgMode === 'AUTO') {
     const l = g.lgnsChain === 'anubis' ? legs.lgnsAnubis : legs.lgnsPolygon;
     if (usableLeg(l, nowMs)) { g.lgnsPriceDai = formatUnits(BigInt(l.value), 18); use.lgns = { mode: 'AUTO', status: 'OK', key: l.key, value: l.value, fetchedAt: l.fetchedAt, blockNumber: l.source?.blockNumber ?? null }; }
-    else { g.lgnsPriceDai = ''; use.lgns = { mode: 'AUTO', status: 'UNAVAILABLE', error: l?.error ?? '시세 없음' }; }
+    else { g.lgnsPriceDai = ''; use.lgns = { mode: 'AUTO', status: 'UNAVAILABLE', error: l?.error ?? '시세 없음' }; if (f.requireLive) errors.push('최신 LGNS 시세를 조회해야 계산할 수 있습니다.'); }
   } else if (g.asset === 'LGNS' && lgMode === 'MANUAL') use.lgns = { mode: 'MANUAL', status: 'USER' };
   return { f: g, errors, use };
 }
@@ -230,7 +231,8 @@ export function applyMarket(f, market, nowMs = Date.now()) {
 export function compute(f0, snapshot, market = null, nowMs = Date.now()) {
   const m = applyMarket(f0, market, nowMs), f = m.f;
   const { raw, uiErrors: ue } = formToRaw(f);
-  const uiErrors = [...m.errors, ...ue];
+  const uiErrors = [...m.errors, ...ue, ...(f0.requireLive ? liveCalculationErrors(snapshot, nowMs) : [])];
+  if (f0.requireLive && raw.startDate < kstDate(Math.floor(nowMs / 1000))) uiErrors.push('현재 기준 계산의 시작 날짜는 오늘 이후여야 합니다.');
   let scenario;
   try { scenario = normalizeInput(raw); }
   catch (e) { return { errors: [...uiErrors, ...(e.errors ?? [`${e.name === 'InputError' ? '' : '계산 모듈 오류: '}${e.message}`])], raw }; }
@@ -240,6 +242,7 @@ export function compute(f0, snapshot, market = null, nowMs = Date.now()) {
   try {
     const quote = getEntryQuote(scenario, snapshot);
     const result = simulate(scenario, snapshot, policy);
+    if (m.use.ailgns?.source === 'SPOT') result.summary.params.price = `MARKET/OBSERVED · ${m.use.ailgns.fetchedAt} · block ${m.use.ailgns.blockNumber ?? '?'}`;
     return { errors: [], raw, scenario, quote, result, policy, budget: compareBudget(scenario, result), marketUse: m.use };
   } catch (e) { return { errors: [`계산 불가: ${e.message}`], raw }; }
 }
@@ -397,7 +400,7 @@ export const QUICK_POLICIES = [{ recycleBps: 0 }, { recycleBps: 5000 }, { recycl
 
 /** 3·6·12개월 카드(같은 장부의 마일스톤 행). 2·3년은 자세히 표에만. */
 export function milestoneCards(result) {
-  return result.summary.milestones.filter((m) => m.months <= 24).map((m) => ({ label: m.label, date: m.date, record: m.record ?? null }));
+  return result.summary.milestones.filter((m) => m.months <= 24).map((m) => ({ label: m.label, date: m.record?.date ?? m.date, periodEnd: m.date, record: m.record ?? null }));
 }
 
 /**
@@ -489,7 +492,7 @@ export function singleChartModel(model, tab) {
 // ================= DOM =================
 const $ = (id) => document.getElementById(id);
 const st = { snapshot: null, pending: null, out: null, charts: null, cursor: 0, pinned: null, changelog: [], prevFlat: null,
-  market: { loading: true, legs: {} }, pendingMarket: null,
+  market: { loading: true, legs: {} }, pendingMarket: null, liveLoading: false, fingerprintBaseline: PROTOCOL_BASELINE.fingerprint, startDateEdited: false,
   roiView: false, showMsDetail: false, tab: 0, ledgerPage: 0, evByDay: new Map(), inputValid: false,
   reserveAdvice: { job: 0, out: null, status: 'idle', plan: null },
   reserveAuto: { dirty: true },
@@ -503,7 +506,7 @@ function readForm() {
     else if (elx.type === 'checkbox') f[elx.name] = elx.checked;
     else f[elx.name] = elx.value;
   }
-  return applySimpleForm(f);
+  return { ...applySimpleForm(f), requireLive: true };
 }
 const setField = (name, value) => {
   const els = document.querySelectorAll(`#inputs [name="${name}"], [name="${name}"][form="inputs"]`);
@@ -599,18 +602,22 @@ const ageText = (s) => (s === null || s === undefined ? '?' : s < 120 ? `${s}초
 const badge = (s) => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
 
 function renderDataBar() {
-  const s = st.snapshot;
+  const s = st.snapshot ? validateSnapshot(st.snapshot).snapshot : null;
   if (!s) { $('data-status').innerHTML = `${badge('UNAVAILABLE')} 스냅샷 없음 — 가정 영역에 값을 직접 입력하세요`; return; }
   const v = (k) => s.values?.[k]?.value ?? null;
   const modeLabel = { SAVED: '저장 데이터', LIVE: '실시간 조회', STALE: '조회값(오래됨)', PARTIAL: '일부만 갱신', MANUAL: '저장 데이터 없음', UNAVAILABLE: '조회 실패' }[s.mode] ?? s.mode;
   const issues = (s.issues ?? []).filter((i) => i.level !== 'info');
   const errs = issues.filter((i) => i.level === 'error');
-  $('data-status').innerHTML = `${badge(s.mode)} ${esc(modeLabel)} · ${esc(kstTime(s.meta?.fetchedAt))} (${esc(ageText(s.ageSeconds))})`
+  $('data-status').innerHTML = `${badge(s.mode)} ${esc(modeLabel)} · ${esc(kstTime(s.meta?.fetchedAt))} (${esc(ageText(Math.floor((Date.now() - Date.parse(s.meta?.fetchedAt)) / 1000)))})`
     + (errs.length ? ` · <span class="warn">데이터 오류 ${errs.length}건</span>` : '');
+  for (const [field, key] of [['engine.annualRateBps','annualRateBps'],['engine.turbineFeeBps','turbineFeeBps'],['engine.sellTaxBps','sellFeeBps']]) {
+    const input = $('inputs').elements[field]; if (input) input.placeholder = v(key) == null ? '최신 조회 필요' : `${v(key)} bps · 최신 조회값`;
+  }
   $('data-detail').innerHTML = [
     `Anubis 블록 <b>${s.meta?.blockNumber != null ? fmtN(s.meta.blockNumber, 0) : 'N/A'}</b>`,
     `dApp 정산일 <b>${esc(v('dappDay') ?? 'N/A')}</b>`,
-    s.meta?.fingerprint ? `지문 ${esc(s.meta.fingerprint)}` : '',
+    s.meta?.fingerprint ? `체인 ${esc(s.meta.fingerprint.chainId)} · 코드 지문 ${Object.entries(s.meta.fingerprint.contracts ?? {}).map(([a, v]) => `${esc(a.slice(0, 8))}… ${esc(v.codeHash ?? "조회 실패")}`).join(" / ")}` : '',
+    `코드 지문 기준 블록 ${PROTOCOL_BASELINE.blockNumber} · 관측 지문 대조이며 동작·보안 검증은 아님`,
     s.mode === 'LIVE' ? '' : '실시간 아님 · 체인 값은 관측값(OBSERVED, 의미 미검증)',
     ...issues.map((i) => `<span class="${i.level === 'error' ? 'warn' : ''}">${esc(i.msg)}</span>`),
   ].filter(Boolean).join('<br>');
@@ -630,31 +637,40 @@ async function loadMarket({ applyNow = false } = {}) {
 }
 
 async function doLive() {
+  if (st.liveLoading) return;
+  st.liveLoading = true;
+  if (!st.startDateEdited) setField('startDate', todayKst());
+  const rerun = st.opt.hasRun;
   const btn = $('btn-live'); btn.disabled = true;
-  $('data-pending').textContent = '프로토콜 데이터·시장 시세 조회 중… (최대 10초)';
-  const [proto, mk] = await Promise.allSettled([refreshLive({ base: st.snapshot ?? { values: {} } }), loadMarket()]);
-  const msg = [];
-  if (proto.status === 'fulfilled' && proto.value.snapshot && proto.value.snapshot.mode !== 'UNAVAILABLE') {
-    const m = mergeLive(st.snapshot, proto.value.snapshot);
-    st.pending = m.snapshot;
-    msg.push(`프로토콜 데이터 변경 ${m.changed.length}개${m.kept.length ? `, 실패 ${m.kept.length}개는 이전 값 유지` : ''}`);
-  } else msg.push(`<span class="warn">프로토콜 데이터 조회 실패 — 저장값 유지</span>`);
-  if (mk.status === 'fulfilled') msg.push(`시장 시세 ${mk.value.okCount}/${Object.keys(mk.value.merged.legs).length} 성공 (${esc(kstTimeShort(mk.value.merged.fetchedAt))})`);
-  $('data-pending').innerHTML = `${msg.join(' · ')}. ${st.pending || st.pendingMarket ? '<b>‘이 값으로 다시 계산’을 눌러야 결과에 반영됩니다.</b>' : ''}`;
-  btn.disabled = false; renderDataBar();
+  $('data-pending').textContent = '프로토콜·시장 시세 조회 중… 완료되면 자동 반영합니다.';
+  const base = { ...st.snapshot, meta: { ...st.snapshot?.meta, fingerprint: st.fingerprintBaseline } };
+  try {
+    const [proto, mk] = await Promise.allSettled([refreshLive({ base }), loadMarket()]);
+    if (proto.status === 'fulfilled' && proto.value.snapshot) {
+      st.pending = acceptLiveSnapshot(proto.value.snapshot);
+      if (!st.fingerprintBaseline && !liveCalculationErrors(st.pending).length) st.fingerprintBaseline = st.pending.meta.fingerprint;
+    } else st.pending = { ...st.snapshot, mode: 'UNAVAILABLE' };
+    if (mk.status === 'rejected') st.pendingMarket = { mode: 'MARKET', legs: {} };
+    st.liveLoading = false;
+    applyPending();
+    $('data-pending').textContent = st.inputValid ? '최신 조회값 자동 반영 완료 · 미래 값은 현재 조건 유지 가정' : '일부 조회 실패 또는 데이터 확인 필요 — 계산을 보류합니다.';
+    if (rerun && st.inputValid) st.opt.rerunTimer = setTimeout(runOptimizer, 250);
+  } finally { st.liveLoading = false; btn.disabled = false; }
 }
 function applyPending() {
   if (!st.pending && !st.pendingMarket) return;
+  const preservePolicy = st.opt.hasRun;
+  if (preservePolicy) { cancelOptimizer('최신 조건으로 다시 비교합니다.'); st.opt.applied = null; }
   if (st.pending) {
     const kept = st.pending.keptFromLastGood ?? [];
-    st.snapshot = validateSnapshot(st.pending).snapshot; st.pending = null;
+    st.snapshot = acceptLiveSnapshot(st.pending); st.pending = null;
     if (kept.length) st.snapshot.issues.push({ level: 'warn', code: 'PARTIAL_STALE', msg: `조회 실패 ${kept.length}개 값은 이전 값(STALE) 유지` });
     logChange([`스냅샷 적용: ${st.snapshot.mode} · 블록 ${st.snapshot.meta?.blockNumber ?? 'N/A'} · ${kstTime(st.snapshot.meta?.fetchedAt)}`]);
   }
   if (st.pendingMarket) { st.market = st.pendingMarket; st.pendingMarket = null; logChange([`시장 시세 적용: ${kstTimeShort(st.market.fetchedAt)}`]); }
   $('data-pending').textContent = '';
-  st.reserveAuto.dirty = true;
-  renderDataBar(); recompute();
+  if (!preservePolicy) st.reserveAuto.dirty = true;
+  renderDataBar(); recompute({ preserveOptimizer: preservePolicy });
 }
 
 function logChange(lines) {
@@ -759,8 +775,9 @@ function recompute({ preserveOptimizer = false } = {}) {
   renderQuickSummary(out);
   renderMarketStrip();
   if (out.errors.length) {
-    errBox.innerHTML = `<b>입력 확인 필요</b>${st.out ? ' — 아래는 마지막 정상 결과입니다' : ''}<ul>${out.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>`;
-    document.querySelectorAll('.results > .card').forEach((c) => c.classList.toggle('stale-result', !!st.out));
+    cancelOptimizer('최신 데이터 확인 후 다시 비교합니다.'); st.opt.applied = null;
+    errBox.innerHTML = st.liveLoading && !st.out ? '<b>최신 시세와 프로토콜 값을 확인하고 있습니다…</b>' : `<b>입력·최신 데이터 확인 필요</b><p>${esc(out.errors[0])}</p><details><summary>확인할 항목 ${out.errors.length}개</summary><ul>${out.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></details>`;
+    document.querySelectorAll('.results > .card:not(.results-summary):not(.strategy)').forEach((c) => c.classList.add('stale-result'));
     renderLgnsStatus();
     renderCompare();
     return false;
@@ -823,7 +840,7 @@ function renderQuickSummary(out) {
   }
   const rows = quickSummaryRows(out);
   if (!rows) { box.innerHTML = `<p class="qs-empty">입력 확인 필요 — ${esc(out.errors?.[0] ?? '값을 확인하세요')}</p>`; return; }
-  const basis = st.opt.applied?.plan?.label ?? '매일 받기 비교 기준';
+  const basis = st.opt.applied?.plan?.label ?? (out.policy?.switchDay > 0 ? `${out.policy.switchDay}일 전환 전략 · 최신 조건 재계산(최대 효율 비교 중)` : '매일 받기 비교 기준');
   box.innerHTML = `<p class="section-kicker">${esc(basis)}</p><table class="qs"><thead><tr><th>기간</th><th>누적 실제 현금</th><th>현금 ROI</th></tr></thead><tbody>${rows.map((r) => (r.available
     ? `<tr><th scope="row">${esc(r.label)}</th><td><b>${esc(r.primary)}</b>${r.secondary ? `<small>${esc(r.secondary)}</small>` : ''}</td><td class="${r.roiBps !== null && r.roiBps < 0 ? 'neg' : ''}"><b>${esc(r.roi)}</b></td></tr>`
     : `<tr><th scope="row">${esc(r.label)}</th><td colspan="2">기간 밖</td></tr>`)).join('')}</tbody></table>`
@@ -863,7 +880,7 @@ function renderMarketStrip() {
     const prev = l?.previous ? ` · 이전 ${esc(fmt(l.previous.value))} (${esc(kstTimeShort(l.previous.fetchedAt))}, 만료·계산에 안 씀)` : '';
     return `<li class="warn">${label}<b>조회 안 됨</b><small>${esc(why)}${prev}</small></li>`;
   };
-  const u = st.out?.marketUse ?? {};
+  const u = st.inputValid ? st.out?.marketUse ?? {} : {};
   const used = [u.fx?.status === 'OK' && '원화 환율: 실시간', u.ailgns && `AiLGNS: ${({ SPOT: '실시간 spot', SAVED_TWAP: '저장 TWAP', USER: '직접 입력' })[u.ailgns.source] ?? ''}`,
     u.lgns && `LGNS: ${u.lgns.status === 'OK' ? '실시간' : u.lgns.status === 'USER' ? '직접 입력' : '없음'}`].filter(Boolean).join(' · ');
   box.innerHTML = `<div class="ms-head"><b>시장 시세</b><button type="button" class="link" id="btn-market">새로고침</button></div>
@@ -879,7 +896,7 @@ function marketDetailHtml(m) {
     const up = s.market ? `업비트 ${esc(s.market)} ${esc(s.tradePrice)} (체결 ${esc(new Date(s.tickerTimestamp).toISOString())})` : '';
     return `<li><b>${esc(l.label)}</b> ${badge(l.status)} ${l.value ? esc(formatUnits(BigInt(l.value), 18)) + ' ' + esc(l.unit) : ''}<br><small>${[blk, pool, up, l.fetchedAt && `조회 ${esc(l.fetchedAt)}`, l.error && `<span class="warn">${esc(l.error)}</span>`].filter(Boolean).join('<br>')}</small></li>`;
   }).join('');
-  return `<ul class="warn-list">${rows || '<li>아직 조회 결과 없음</li>'}</ul><p class="hint">시장 시세는 프로토콜 데이터(저장 스냅샷)와 별도 출처입니다. Oracle TWAP 저장값은 바꾸지 않습니다.</p>`;
+  return `<ul class="warn-list">${rows || '<li>아직 조회 결과 없음</li>'}</ul><p class="hint">시장 spot과 프로토콜 Oracle TWAP은 별도 출처이며 각각 최신 조회합니다. 조회 시각·블록을 구분하여 기록합니다.</p>`;
 }
 
 function renderAll() {
@@ -1042,11 +1059,11 @@ function renderMilestones() {
       <p class="hint">미완료 장부의 0원·음수 ROI는 정상 성과가 아니므로 기간별 결과를 표시하지 않습니다.</p>`;
     return;
   }
-  const head = ['기간 · 목표일', '기준 정산(장부 행)', '누적 배출 DAI 가치', '누적 총투입', '누적 외부 회수', '현금 순이익', 'ROI', '미회수 원금', ...(det ? ['정산 횟수', '내부 DAI', '잠금 AiLGNS', '대기 Power'] : [])];
+  const head = ['기간 · 마지막 정산일', '기준 정산(장부 행)', '누적 배출 DAI 가치', '누적 총투입', '누적 외부 회수', '현금 순이익', 'ROI', '미회수 원금', ...(det ? ['정산 횟수', '내부 DAI', '잠금 AiLGNS', '대기 Power'] : [])];
   const rows = result.summary.milestones.map((m) => {
     const r = m.record;
     if (!r) return `<tr><td>${esc(m.label)} · ${esc(m.date)}</td><td colspan="${head.length - 1}">장부 미도달</td></tr>`;
-    return `<tr class="clickable em" tabindex="0" data-day="${r.day}"><td>${esc(m.label)} · ${esc(m.date)} <span class="hint">(시작 후 ${m.day}일)</span></td>
+    return `<tr class="clickable em" tabindex="0" data-day="${r.day}"><td>${esc(m.label)} · ${esc(r.date)} <span class="hint">(기간 종료 ${esc(m.date)} 전 마지막 정산)</span></td>
       <td>${esc(r.date)} <span class="hint">정산 ${r.day + 1}회차</span></td>
       <td>${fmtDai(r.cumEmissionDai, 0)}</td><td>${fmtDai(r.I, 0)}</td><td>${fmtDai(r.cumWithdrawal, 0)}</td>
       <td class="${r.net !== null && r.net < 0n ? 'neg' : ''}">${fmtDai(r.net, 0)}</td><td>${fmtBpsPct(roiBpsOf(r.net, r.I))}</td><td>${fmtDai(r.unrecovered, 0)}</td>
@@ -1284,7 +1301,7 @@ export function noWinnerMessage(out, res) {
   const headline = allEmpty ? '완료 가능한 전략을 찾지 못했습니다.' : '일부 기간에 완료 가능한 전략이 없습니다.';
   const x = explainBlocking(out), t = blockingText(x);
   const current = t ? { label: '현재 선택한 전략의 확인 사항', main: t.main, notes: t.notes, fixable: t.fixable, kind: x.kind } : null;
-  const dataNote = res?.gate && !res.gate.ok ? '저장 데이터 일부가 확인되지 않아 모든 후보를 조건부로 분류했습니다.' : null;
+  const dataNote = res?.gate && !res.gate.ok ? '조회 데이터 일부가 확인되지 않아 모든 후보를 조건부로 분류했습니다.' : null;
   return { headline, allEmpty, emptyYears: empty.map((g) => g.horizonYears), current, dataNote };
 }
 
@@ -1326,7 +1343,7 @@ export function optGroupsHtml(res, out) {
 
 function renderCompare() {
   const box = $('compare-body'); if (!box) return;
-  const o = st.opt, a = o.applied;
+  const o = st.opt, a = st.inputValid ? o.applied : null;
   let result = '';
   if (a) {
     const s = a.replay.full.summary, plan = a.plan, pb = s.paybackDay == null ? null : a.replay.full.daily[s.paybackDay];
@@ -1355,7 +1372,7 @@ function optimizerFailureHtml(res) {
   const g = res?.results?.find((x) => x.horizonYears === Number(st.out?.scenario?.horizonYears)) ?? res?.results?.[0];
   if (g?.winners?.maxRoi?.winner) return '<div class="block-msg">전체 장부 재검산이 일치하지 않아 추천을 적용하지 않았습니다.</div>';
   const by = g?.conditional?.byReason ?? {};
-  let why = res?.gate && !res.gate.ok ? '현재 저장 데이터가 미확정이어서 정상 후보로 검증하지 못했습니다.'
+  let why = res?.gate && !res.gate.ok ? '현재 조회 데이터가 미확정이어서 정상 후보로 검증하지 못했습니다.'
     : by.OVER_BUDGET ? '고정한 초기예산 안에서 완료되는 후보가 없습니다.'
       : '현재 준비금·가스·처리 조건으로 완료 가능한 후보가 없습니다.';
   const current = blockingText(explainBlocking(st.out));
@@ -1470,7 +1487,6 @@ function runOptimizer() {
   if (!st.inputValid || !st.out?.scenario) { st.opt.status = '입력 오류를 먼저 해결하세요.'; renderCompare(); return; }
   if (reserveModeOf(readForm()) === 'AUTO' && st.reserveAdvice.status === 'loading') { st.opt.status = '운전자금 자동 산정이 끝난 뒤 계산하세요.'; renderCompare(); return; }
   st.opt.applied = null;
-  resetBaselinePolicy();
   if (!recompute({ preserveOptimizer: true })) { st.opt.status = '입력 오류를 먼저 해결하세요.'; renderCompare(); return; }
   const req = optimizeRequest(st.out, st.snapshot);
   if (!makeWorkerAvailable()) { runMainThread(req); return; }
@@ -1503,7 +1519,7 @@ function renderMore() {
   $('sources').innerHTML = `<h3>계산에 쓴 값의 출처</h3><div class="tbl-wrap"><table><tbody>${prov}</tbody></table></div>
     <h3>스냅샷 (${esc(snap?.mode ?? '없음')}, ${esc(kstTime(snap?.meta?.fetchedAt))})</h3>
     <div class="tbl-wrap"><table><thead><tr><th>키</th><th>원값</th><th>단위</th><th>상태</th><th>블록</th><th>출처</th><th>method</th><th>메모</th></tr></thead><tbody>${vals}</tbody></table></div>
-    <p class="hint">저장 스냅샷은 LIVE로 표시하지 않습니다. null은 미조회이며 0이 아닙니다. 별도 최신 확인 기록은 <a href="../evidence/flow-live-parameters-2026-10-24.json">2026-10-24 RPC 확인 근거</a>이며, 이 화면의 스냅샷을 통째로 대체했다는 뜻은 아닙니다.</p>`;
+    <p class="hint">저장 스냅샷은 LIVE로 표시하지 않습니다. null은 미조회이며 0이 아닙니다. 계산에 사용한 RPC·API·조회 블록은 위 표와 JSON 내보내기에 기록됩니다.</p>`;
   if ($('d-ledger').open) renderLedger();
 }
 function renderLedger(followPin = false) {
@@ -1604,10 +1620,10 @@ export async function init() {
   // 첫 화면 0 결과 방지: 예시 조건을 처음 한 번만 적용(이후 사용자 입력을 덮지 않음).
   for (const [k, v] of Object.entries(EXAMPLE_VALUES)) setField(k, v);
   st.changelog.push({ at: new Date().toISOString(), text: '처음 화면 예시 조건 적용: 운전자금 20 · 가스 40 DAI(측정값 아님) · 가스 부족 시 내부 DAI 보충(환전·가스비 가정) · 즉시 수령 5000bps' });
-  const marketReady = loadMarket({ applyNow: true }); // AUTO 모드면 첫 시세를 바로 계산에 반영
+  // 저장 파일은 계약 주소·메서드 목록으로만 사용하고, 첫 계산 전 실시간 조회한다.
   st.snapshot = await loadSavedSnapshot();
   renderDataBar();
-  marketReady.catch(() => {});
+
   document.addEventListener('click', (e) => {
     const b = e.target.closest?.('[data-open-settings]');
     if (b) { e.preventDefault(); openSettings(b.dataset.openSettings); }
@@ -1638,6 +1654,7 @@ export async function init() {
   $('inputs').querySelectorAll('[data-switch]').forEach((b) => { b.onclick = () => { setField('switchDay', b.dataset.switch); recompute(); }; });
   let t = null;
   const prepareReserveEdit = (target) => {
+    if (target?.name === 'startDate') st.startDateEdited = true;
     if (target?.name === 'reserveDai') { setField('reserveMode', 'MANUAL'); st.reserveAuto.dirty = false; return; }
     if (target?.name === 'reserveMode') { st.reserveAuto.dirty = target.value === 'AUTO'; return; }
     if (reserveModeOf(readForm()) === 'AUTO') st.reserveAuto.dirty = true;
@@ -1646,7 +1663,7 @@ export async function init() {
     prepareReserveEdit(e.target);
     st.inputValid = false; st.opt.applied = null; resetBaselinePolicy(); invalidateReserveAdvice();
     cancelOptimizer('입력 변경으로 이전 추천을 지웠습니다.');
-    document.querySelectorAll('.results > .card').forEach((c) => c.classList.add('stale-result'));
+    document.querySelectorAll('.results > .card:not(.results-summary):not(.strategy)').forEach((c) => c.classList.add('stale-result'));
     $('quick-summary').innerHTML = '<p class="qs-pending">입력 반영 중 · 이전 추천을 지웠습니다.</p>';
     renderCompare(); clearTimeout(t); t = setTimeout(recompute, 300);
   });
@@ -1664,12 +1681,18 @@ export async function init() {
   $('btn-json').onclick = exportJson; $('btn-csv').onclick = exportCsv;
   $('btn-minreserve').onclick = doMinReserve; $('btn-example').onclick = applyExample;
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && st.pinned !== null) st.charts?.pin(null); });
-  let timer = null;
-  $('auto-live').onchange = (e) => {
-    clearInterval(timer);
-    if (e.target.checked) timer = setInterval(() => { if (document.visibilityState === 'visible') doLive(); }, 60000);
-  };
+  // Expiration is checked even without user input; visibility resume immediately refreshes.
+  setInterval(() => {
+    renderDataBar();
+    if (st.inputValid && (liveCalculationErrors(st.snapshot).length || applyMarket(readForm(), st.market).errors.length)) recompute({ preserveOptimizer: true });
+  }, 1000);
+  setInterval(() => { if (document.visibilityState === 'visible') doLive(); }, 60000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { recompute({ preserveOptimizer: true }); doLive(); }
+  });
+  const liveReady = doLive();
   recompute();
+  await liveReady;
 }
 
 if (typeof document !== 'undefined' && document.getElementById('inputs')) init();

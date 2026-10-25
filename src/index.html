@@ -11,7 +11,7 @@
 <header class="top">
   <h1>HELIX 계산기</h1>
   <p class="sub">금액을 넣고, 기간별 수령액을 확인하세요.</p>
-  <details class="source-disclosure"><summary>데이터 기준 확인</summary>
+  <div class="source-disclosure">
   <div id="data-bar" class="data-bar" aria-label="기준 데이터">
     <span id="data-status" class="data-status">데이터 불러오는 중</span>
     <button type="button" id="btn-live" class="link">새로 조회</button>
@@ -20,10 +20,10 @@
     <details id="d-data" class="data-more">
       <summary>데이터 상세</summary>
       <div id="data-detail"></div>
-      <label class="inline"><input type="checkbox" id="auto-live"> 60초마다 자동 조회(화면이 보일 때만)</label>
+      <p class="hint">60초마다 자동 조회·계산 반영 · 5분 지난 값은 계산 중단 · 화면 복귀 시 즉시 재조회</p>
     </details>
   </div>
-  </details>
+  </div>
 </header>
 
 <main class="layout">
@@ -88,15 +88,12 @@
       <p class="hint">DAI/원화 환율은 Anubis DAI/USDT × 업비트 USDT/KRW 자동 조회만 사용합니다. 조회되지 않으면 원화 계산을 만들지 않습니다.</p>
       <label>AiLGNS 가격<select name="market.ailgns">
         <option value="AUTO" selected>실시간 (Anubis 풀 spot)</option>
-        <option value="SNAPSHOT">저장된 Oracle TWAP</option>
-        <option value="MANUAL">직접 입력</option>
       </select></label>
       <label data-show-ail-manual>AiLGNS 가격 (DAI)<input name="engine.priceDaiPerAilgns" inputmode="decimal"></label>
       <label>LGNS 가격<select name="market.lgns">
         <option value="AUTO" selected>실시간 (선택 체인 풀 spot)</option>
-        <option value="MANUAL">직접 입력</option>
       </select></label>
-      <p class="hint">실시간 값은 새로고침해도 직접 입력한 값을 지우지 않습니다. 계산은 현재 값을 미래에도 고정해 씁니다(가격 예측 없음).</p>
+      <p class="hint">최신 조회값을 자동 적용합니다. 조회 실패·만료 시 저장값으로 대체하지 않습니다. 미래 가격·배출률은 현재 조건 유지 가정입니다.</p>
 
       <h3>준비금</h3>
       <p class="hint">기본 자동 모드는 20 DAI에서 시작해 현재 매일 받기 경로와 선택 기간이 완료되는 값을 조건부로 찾습니다. 전체 전략과 운전자금을 함께 최적화하는 값은 아닙니다.</p>
@@ -149,10 +146,10 @@
       </div>
 
       <h3>가격·수수료·지연</h3>
-      <p class="hint">빈 칸은 저장 데이터 값을 씁니다.</p>
-      <label>연 배출률 (bps)<input name="engine.annualRateBps" inputmode="numeric" placeholder="저장 데이터 값"></label>
-      <label>터빈 수수료 (bps)<input name="engine.turbineFeeBps" inputmode="numeric" placeholder="저장 데이터 값"></label>
-      <label>AiLGNS 매도세 (bps)<input name="engine.sellTaxBps" inputmode="numeric" placeholder="저장 데이터 값"></label>
+      <p class="hint">배출률·터빈 수수료·매도세는 최신 체인 조회값을 사용합니다. 그 밖의 지연·가스·풀 수수료는 별도 모형 가정입니다.</p>
+      <label>연 배출률 (bps)<input name="engine.annualRateBps" inputmode="numeric" readonly placeholder="최신 조회 필요"></label>
+      <label>터빈 수수료 (bps)<input name="engine.turbineFeeBps" inputmode="numeric" readonly placeholder="최신 조회 필요"></label>
+      <label>AiLGNS 매도세 (bps)<input name="engine.sellTaxBps" inputmode="numeric" readonly placeholder="최신 조회 필요"></label>
       <label>가격 모형<select name="priceModel">
         <option value="LINEAR">선형 (가격 고정 가정)</option>
         <option value="AMM_DAILY_RESET">AMM 일별 재구성</option>
@@ -160,8 +157,8 @@
       <label>풀 깊이 (DAI, AMM용)<input name="engine.poolDepthDai" inputmode="decimal"></label>
       <label>풀 수수료 (bps, 미검증 가정)<input name="engine.poolFeeBps" inputmode="numeric" value="30"></label>
       <label class="inline"><input type="checkbox" name="engine.feeIncludedInQuote"> 풀 수수료가 견적에 포함됨</label>
-      <label>진입 편입 지연 (일)<input name="engine.entryLagDays" inputmode="numeric" value="1"></label>
-      <label>재소각 편입 지연 (일)<input name="engine.reburnLagDays" inputmode="numeric" value="1"></label>
+      <label>진입 편입 지연 (일, LGNS 소각은 1 이상)<input name="engine.entryLagDays" inputmode="numeric" value="1"></label>
+      <label>재소각 편입 지연 (일, 1 이상)<input name="engine.reburnLagDays" inputmode="numeric" value="1"></label>
       <label>터빈 즉시 수령 비율 (bps)<input name="engine.immediateBps" inputmode="numeric" value="0"></label>
       <label class="inline"><input type="checkbox" name="engine.ignoreBurnCaps" checked> 계산에서는 LGNS·AiLGNS 소각 한도 제외</label>
       <p class="hint warn-text">현재 관측 한도는 위에 별도 표시합니다. 이 체크는 미래 계산 가정이며 현재 소각·실거래 가능을 뜻하지 않습니다.</p>
@@ -214,7 +211,7 @@
       <details id="d-entry"><summary>진입 과정</summary><div id="entry"></div></details>
       <details id="d-unreal"><summary>끝날 때 남는 잔액(현금 아님)</summary><div id="unrealized"></div></details>
       <details id="d-warn"><summary id="warn-summary">가정과 경고</summary><div id="warnings"></div></details>
-      <details id="d-src"><summary>출처와 저장 데이터 값</summary><div id="sources"></div></details>
+      <details id="d-src"><summary>출처와 계산 기준 값</summary><div id="sources"></div></details>
       <details id="d-ledger"><summary>일별 장부</summary><div id="ledger"></div></details>
       <details id="d-log"><summary>입력 변경 기록</summary><ol id="changelog"></ol></details>
       <div class="actions">

@@ -303,7 +303,8 @@ test('원화 AUTO: 실시간 교차 환율로 계산, 요약은 원화 우선·�
 test('원화 AUTO 실패: 계산을 막고 수동값으로 몰래 대체하지 않음, MANUAL은 직접 입력 사용', () => {
   const noFx = { ...MKT, legs: { ...MKT.legs, fx: { key: 'fx', status: 'UNAVAILABLE', value: null, error: 'x' } } };
   const out = compute(applySimpleForm(F({ ...AUTO, asset: 'KRW', amount: '1000000', 'fx.daiKrw': '1400' })), SNAP, noFx, NOWM);
-  assert.ok(out.errors.some((e) => /원화 계산을 할 수 없습니다/.test(e)));
+  assert.ok(out.errors.some((e) => /DAI\/KRW/.test(e)));
+  assert.equal(out.result, undefined);
   assert.equal(quickSummaryRows(out), null);                                // 입력 확인 필요(숫자 없음)
   const loading = compute(applySimpleForm(F({ ...AUTO, asset: 'KRW', amount: '1000000' })), SNAP, { loading: true, legs: {} }, NOWM);
   assert.ok(loading.errors.some((e) => /불러오는 중/.test(e)));
@@ -319,19 +320,19 @@ test('원화 AUTO 실패: 계산을 막고 수동값으로 몰래 대체하지 �
   const bad = { ...MKT, legs: { ...MKT.legs, fx: { ...MKT.legs.fx, value: 'abc' } } };
   assert.doesNotThrow(() => compute(base, SNAP, bad, NOWM));
   assert.ok(compute(base, SNAP, bad, NOWM).errors.length > 0);
-  // 만료된 AiLGNS spot도 쓰지 않음 → 저장 TWAP
-  assert.equal(compute(F({ ...EXAMPLE_VALUES, ...AUTO }), SNAP, MKT, NOWM + 301000).marketUse.ailgns.source, 'SAVED_TWAP');
+  // 만료된 AiLGNS spot은 저장 TWAP으로 대체하지 않고 중단
+  assert.ok(compute(F({ ...EXAMPLE_VALUES, ...AUTO }), SNAP, MKT, NOWM + 301000).errors.some(x => x.includes('AiLGNS')));
 });
 
-test('AiLGNS: AUTO는 spot을 엔진 가격으로, 실패 시 저장 TWAP 표시, TWAP 증거는 그대로', () => {
+test('AiLGNS: AUTO는 spot을 엔진 가격으로, 실패 시 중단, TWAP 증거는 그대로', () => {
   const twap = SNAP.values.oracleTwapDaiPerAilgns.value;
   const a = compute(F({ ...EXAMPLE_VALUES, ...AUTO }), SNAP, MKT, NOWM);
   assert.equal(a.scenario.engine.priceDaiPerAilgns, 700n * E18);
   assert.equal(a.marketUse.ailgns.source, 'SPOT');
   assert.equal(SNAP.values.oracleTwapDaiPerAilgns.value, twap);
   const b = compute(F({ ...EXAMPLE_VALUES, ...AUTO }), SNAP, { legs: {} }, NOWM);
-  assert.equal(b.scenario.engine.priceDaiPerAilgns, null);
-  assert.equal(b.marketUse.ailgns.source, 'SAVED_TWAP');
+  assert.ok(b.errors.some(x => x.includes('AiLGNS')));
+  assert.equal(b.result, undefined);
   const s = compute(F({ ...EXAMPLE_VALUES, ...AUTO, 'market.ailgns': 'SNAPSHOT', 'engine.priceDaiPerAilgns': '5' }), SNAP, MKT, NOWM);
   assert.equal(s.scenario.engine.priceDaiPerAilgns, null);
   // 직접 입력은 시세 새로고침 값으로 덮지 않음

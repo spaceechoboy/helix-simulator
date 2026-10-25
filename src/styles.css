@@ -89,7 +89,7 @@ button:disabled { opacity: .4; cursor: default; }
 .errors:empty { display: none; }
 .errors { border: 1px solid var(--warn); background: var(--warn-bg); color: var(--warn); padding: .8rem 1rem; border-radius: var(--r); font-size: .92rem; }
 .errors ul { margin: .3rem 0 0; padding-left: 1.2rem; }
-.stale-result { opacity: .55; }
+.stale-result { display: none !important; }
 
 /* 결과 */
 .hero { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 16px; align-items: end; }

@@ -172,6 +172,63 @@ test('최소 운전자금: 전체 활성화 성공 기준, 예산 고정, 부족
   assert.equal(poor.status, 'INSUFFICIENT_BUDGET');
 });
 
+test('최소 운전자금 예산: 기존 AiLGNS 원가를 simulate 초기자본과 동일하게 차감', () => {
+  const eng = { initialAilgns: '1', initialAilgnsCostDai: '803', gas: { anubisNativeDai: '100' } };
+  // 진입 1000 + 가스 100 + 기존 원가 803 = 1903 > 1150 → reserve 0이어도 예산 초과(이전엔 hi=50으로 OK 반환)
+  const over = findMinReserve(base({ totalBudgetDai: '1150', engine: eng }), snap, { recycleBps: 0 });
+  assert.equal(over.status, 'INSUFFICIENT_BUDGET');
+  assert.equal(over.maxReserve, wad('1150') - wad('1903'));
+  const sc = base({ totalBudgetDai: '1950', engine: eng });
+  const m = findMinReserve(sc, snap, { recycleBps: 0 }, { stepDai: wad('0.01') });
+  assert.equal(m.status, 'OK');
+  assert.ok(m.minReserve <= wad('47'));
+  const r = simulate({ ...sc, reserveDai: m.minReserve }, snap, { recycleBps: 0 }, { strict: true });
+  assert.equal(r.summary.completed, true);
+  assert.equal(r.summary.initialCapitalDai, wad('1903') + m.minReserve);
+  assert.ok(r.summary.initialCapitalDai <= sc.totalBudgetDai);
+  // 원가 미입력 기존 토큰은 초기자본 미정 → 탐색 불가
+  const unknown = base({ totalBudgetDai: '5000', engine: { initialAilgns: '1', gas: { anubisNativeDai: '100' } } });
+  assert.equal(findMinReserve(unknown, snap, { recycleBps: 0 }).status, 'COST_UNKNOWN');
+});
+
+const fixedSc = (fixed = {}, engine = {}) => normalizeInput({
+  asset: 'LGNS', lgnsChain: 'polygon', amount: '100', startDate: '2026-10-23', costBasis: 'ACQUISITION', acquisitionCostDai: '40', lgnsPriceDai: '0.3',
+  fixed: { recognizedDaiPerLgns: '1', totalPayoutCapBps: 20000, payoutBpsPerPeriod: 50, periodSeconds: 43200, payoutPriceDai: '0.5', ...fixed },
+  engine: { gas: { anubisNativeDai: '1', polygonNativeDai: '0.5' }, ...engine },
+});
+
+test('최소 운전자금 예산: FIXED 경로 Polygon 가스도 초기자본에 포함', () => {
+  const sc = fixedSc();
+  assert.equal(simulate(sc, snap, { recycleBps: 0 }, { horizonDays: 5 }).summary.initialCapitalDai, wad('41.5'));
+  // 원가 40 + Anubis 1 + Polygon 0.5 = 41.5 > 41.4 (이전엔 Polygon 가스 누락으로 hi=0.4)
+  const m = findMinReserve({ ...sc, totalBudgetDai: wad('41.4') }, snap, { recycleBps: 0 });
+  assert.equal(m.status, 'INSUFFICIENT_BUDGET');
+  assert.equal(m.maxReserve, wad('41.4') - wad('41.5'));
+});
+
+test('Anubis LGNS 직접 진입은 entryLagDays로 첫 편입, 재소각 지연과 분리', () => {
+  const lg = normalizeInput({ asset: 'LGNS', lgnsChain: 'anubis', amount: '100', lgnsPriceDai: '1', startDate: '2026-10-23', reserveDai: '50',
+    engine: { ignoreBurnCaps: true, entryLagDays: 5, reburnLagDays: 1, gas: { anubisNativeDai: '100' } } });
+  const r = simulate(lg, snap, { recycleBps: 0 }, { horizonDays: 10 });
+  const burn = r.events.find((e) => e.type === 'HELIX_LGNS_BURN');
+  assert.equal(burn.day, 0);
+  const act = r.events.find((e) => e.type === 'ACTIVATE');
+  assert.equal(act.day, 5);
+  assert.equal(act.route, 'lgnsBurn');
+  assert.equal(act.power, burn.power);
+  for (let d = 0; d < 5; d++) assert.equal(r.daily[d].newActivePower, 0n, `day ${d}`);
+  assert.equal(r.daily[5].newActivePower, burn.power);
+});
+
+test('FIXED 지급 LGNS 소각은 reburnLagDays 유지(entryLagDays 무관)', () => {
+  const r = simulate(fixedSc({ stopDate: '2026-10-26' }, { lgnsBurnOpenFromDay: 10, lgnsPowerPerLgns: '2', entryLagDays: 5, reburnLagDays: 1 }),
+    snap, { recycleBps: 0 }, { horizonDays: 20 });
+  const burn = r.events.find((e) => e.type === 'HELIX_LGNS_BURN');
+  assert.equal(burn.day, 10);
+  assert.equal(r.events.find((e) => e.type === 'ACTIVATE' && e.route === 'lgnsBurn').day, 11);
+  assert.equal(r.daily[11].newActivePower, burn.power);
+});
+
 const assertGasLedger = (r, initialNative) => {
   const refill = r.daily.reduce((sum, day) => sum + day.refillDai, 0n);
   assert.equal(initialNative + refill, r.summary.gasSpent + r.summary.unrealized.nativeGas.anubis);

@@ -164,9 +164,22 @@ export function fnv1a64(s) {
   return h.toString(16).padStart(16, '0');
 }
 
+export function fingerprintComplete(f) {
+  const contracts = Object.values(f?.contracts ?? {});
+  return Number.isInteger(f?.chainId) && f.chainId > 0 && contracts.length > 0
+    && contracts.every(c => typeof c.codeHash === 'string' && c.codeHash.length > 0 && typeof c.impl === 'string' && /^0x[0-9a-f]+$/i.test(c.impl));
+}
+
+/** Adopt current observations only. Optional null is not a failed historical-value merge. */
+export function acceptLiveSnapshot(fresh, now = Date.now()) {
+  const snapshot = validateSnapshot(fresh, {now}).snapshot;
+  snapshot.issues = [...new Map([...(fresh.issues ?? []), ...snapshot.issues].map(i => [`${i.code}:${i.key ?? ''}:${i.msg}`, i])).values()];
+  return snapshot;
+}
+
 /** 기준 지문과 비교. 변경된 항목 목록 반환(기준 없으면 null). */
 export function compareFingerprint(base, cur) {
-  if (!base) return null;
+  if (!fingerprintComplete(base) || !fingerprintComplete(cur)) return null;
   const diff = [];
   if (base.chainId !== cur.chainId) diff.push('chainId');
   for (const [addr, b] of Object.entries(base.contracts ?? {})) {
@@ -184,13 +197,15 @@ export function compareFingerprint(base, cur) {
  */
 export async function refreshLive({ fetchImpl = globalThis.fetch, now = () => Date.now(), timeoutMs = TIMEOUT_MS, rpcUrls = RPC_URLS, base = { values: {} } } = {}) {
   const errors = [], issues0 = [];
+  const deadline = Date.now() + timeoutMs;
+  const remaining = () => { const ms = deadline - Date.now(); if (ms <= 0) throw new Error('전체 조회 timeout'); return ms; };
   const stamp = () => new Date(now()).toISOString();
   let rpc = null, blockHex = null;
   for (const url of rpcUrls.slice(0, 2)) {
-    try { blockHex = await rpcCall(fetchImpl, url, 'eth_blockNumber', [], timeoutMs); rpc = url; break; }
+    try { blockHex = await rpcCall(fetchImpl, url, 'eth_blockNumber', [], remaining()); rpc = url; break; }
     catch (e) { errors.push(`${url}: ${e.message}`); }
   }
-  const call = async (m, p, label) => { try { return await rpcCall(fetchImpl, rpc, m, p, timeoutMs); } catch (e) { errors.push(`${label}: ${e.message}`); return null; } };
+  const call = async (m, p, label) => { try { return await rpcCall(fetchImpl, rpc, m, p, remaining()); } catch (e) { errors.push(`${label}: ${e.message}`); return null; } };
   const blockNumber = blockHex ? Number(BigInt(blockHex)) : null;
   let chainId = null, blockHash = null, blockTimestamp = null, fingerprint = null;
   if (rpc) {
@@ -212,7 +227,7 @@ export async function refreshLive({ fetchImpl = globalThis.fetch, now = () => Da
     const contract = prev?.contract, method = prev?.method;
     let v = null;
     if (rpc && contract && method) {
-      try { v = BigInt(await rpcCall(fetchImpl, rpc, 'eth_call', [{ to: contract, data: method }, blockHex], timeoutMs)).toString(); }
+      try { v = BigInt(await rpcCall(fetchImpl, rpc, 'eth_call', [{ to: contract, data: method }, blockHex], remaining())).toString(); }
       catch (e) { errors.push(`${key}: ${e.message}`); }
     }
     values[key] = ev(v, unit, { chainId, contract, method, blockNumber, blockTimestamp, fetchedAt: stamp(), sourceUrl: rpc, status: v === null ? STATUS.UNAVAILABLE : STATUS.OBSERVED, confidence: v === null ? 'none' : 'medium', notes });
@@ -220,7 +235,7 @@ export async function refreshLive({ fetchImpl = globalThis.fetch, now = () => Da
   const resp = {};
   for (const p of Object.keys(API_TOP_KEYS)) {
     try {
-      const j = await withTimeout(fetchImpl, `${API_BASE}/${p}`, { method: 'GET' }, timeoutMs);
+      const j = await withTimeout(fetchImpl, `${API_BASE}/${p}`, { method: 'GET' }, remaining());
       const missing = API_TOP_KEYS[p].filter((k) => !(k in (j ?? {})));
       if (missing.length) { issues0.push({ level: 'error', code: 'API_SHAPE', msg: `api/${p} 최상위 키 없음: ${missing.join(',')}` }); }
       resp[p] = { body: j, fetchedAt: stamp() };
@@ -230,13 +245,35 @@ export async function refreshLive({ fetchImpl = globalThis.fetch, now = () => Da
     const r = resp[path], v = r ? getPath(r.body, p) : undefined;
     values[key] = ev(v ?? null, unit, { fetchedAt: r?.fetchedAt ?? null, sourceUrl: `${API_BASE}/${path}`, status: v == null ? STATUS.UNAVAILABLE : STATUS.OBSERVED, notes: 'dApp 서버 관측(블록 없음) ' + (notes ?? '') });
   }
+  const completeFingerprint = fingerprintComplete(fingerprint);
+  if (!completeFingerprint) issues0.push({level:'warn',code:'FINGERPRINT_UNAVAILABLE',msg:'코드 지문 조회 실패 — 구현 변경으로 판정하지 않음'});
   const diff = fingerprint ? compareFingerprint(base.meta?.fingerprint ?? null, fingerprint) : null;
   let verification = 'NO_BASELINE';
   if (diff === null) issues0.push({ level: 'info', code: 'NO_BASELINE', msg: '기준 지문 없음 — 이번 지문을 기준 후보로 기록(검증 아님)' });
   else if (diff.length) { verification = 'PENDING_VERIFICATION'; issues0.push({ level: 'error', code: 'IMPL_CHANGED', msg: `구현/코드/체인 변경: ${diff.join(', ')} — 경로 검증대기` }); }
   else verification = 'FINGERPRINT_MATCH';
-  const raw = { schemaVersion: 'helix-sim-snapshot/1', mode: rpc ? 'LIVE' : 'UNAVAILABLE', meta: { blockNumber, blockHash, blockTimestamp, chainId, fetchedAt: stamp(), rpc, fingerprint, verification }, values };
+  const raw = { schemaVersion: 'helix-sim-snapshot/1', mode: rpc ? (completeFingerprint ? 'LIVE' : 'PARTIAL') : 'UNAVAILABLE', meta: { blockNumber, blockHash, blockTimestamp, chainId, fetchedAt: stamp(), rpc, fingerprint, verification }, values };
   const { snapshot, issues } = validateSnapshot(raw, { now: now() });
   snapshot.issues = [...issues0, ...issues];
   return { snapshot, issues: snapshot.issues, errors };
+}
+
+/** Current-input gate for the public calculator. Historical/offline engine replay remains separate. */
+export function liveCalculationErrors(snapshot, now = Date.now()) {
+  const errors = [];
+  const fresh = (iso) => { const age = now - Date.parse(iso); return Number.isFinite(age) && age >= -60000 && age <= STALE_SECONDS * 1000; };
+  if (!snapshot || !['LIVE', 'PARTIAL'].includes(snapshot.mode) || !fresh(snapshot.meta?.fetchedAt))
+    errors.push('최신 프로토콜 데이터를 조회해야 계산할 수 있습니다. 저장값·5분 지난 값은 사용하지 않습니다.');
+  if (!fingerprintComplete(snapshot?.meta?.fingerprint)) errors.push('프로토콜 코드 지문을 다시 조회해야 합니다.');
+  if (snapshot?.meta?.verification === 'PENDING_VERIFICATION') errors.push('프로토콜 구현이 변경되어 검증이 필요합니다.');
+  const blockAge = now - Number(snapshot?.meta?.blockTimestamp) * 1000;
+  if (snapshot?.meta?.chainId !== 6714 || !snapshot?.meta?.blockHash || !Number.isFinite(blockAge) || blockAge < -60000 || blockAge > STALE_SECONDS * 1000)
+    errors.push('Anubis 체인·최신 블록 확인이 필요합니다.');
+  const required = [...CHAIN_READS.map(([, key]) => key), 'daySeconds', 'dayStart', 'apiSellFeeBps', 'apiTurbineFeeBps', 'apiLockSeconds'];
+  for (const key of required) {
+    const v = snapshot?.values?.[key];
+    if (!v || v.value == null || !['OBSERVED', 'LIVE_VERIFIED'].includes(v.status) || !fresh(v.fetchedAt))
+      errors.push(`최신 값 확인 필요: ${key}`);
+  }
+  return errors;
 }

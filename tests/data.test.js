@@ -248,3 +248,14 @@ test('refreshLive 성공(모의): 같은 blockTag, OBSERVED만, LIVE_VERIFIED �
   assert.equal(r.snapshot.values.turbineFeeBps.value, '250');
   assert.equal(r.snapshot.values.communityActualToday.value, null);
 });
+
+test('partial fingerprint RPC failure is unavailable, not a persistent implementation change', async()=>{
+ const mock=makeMock();
+ const broken=async(url,init)=>init.method==='POST' && JSON.parse(init.body).method==='eth_getCode' ? okR({error:{message:'temporary'}}) : mock(url,init);
+ const good=await refreshLive({fetchImpl:mock,base:snap(),now:()=>FETCHED_MS});
+ const failed=await refreshLive({fetchImpl:broken,base:good.snapshot,now:()=>FETCHED_MS});
+ assert.notEqual(failed.snapshot.meta.verification,'PENDING_VERIFICATION');
+ assert.notEqual(failed.snapshot.mode,'LIVE');
+ const recovered=await refreshLive({fetchImpl:mock,base:failed.snapshot,now:()=>FETCHED_MS});
+ assert.notEqual(recovered.snapshot.meta.verification,'PENDING_VERIFICATION');
+});

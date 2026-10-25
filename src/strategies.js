@@ -11,7 +11,8 @@ export const FUTURE_NOTE = '미래 가격·배출·개방·수수료·지연은 
 export const DEFAULT_SEARCH = Object.freeze({ ratioStep: 100, refineStep: 10, refineSpan: 90, switchStride: 1, yieldEvery: 20, nearBestBps: 10 });
 
 /**
- * 정책. ratio는 재순환 bps(0~10000, 100=1%, 10=0.1%). switchDay는 '처음 N회 정산 100% 재순환 → 이후 0%'.
+ * 정책. ratio는 재순환 bps(0~10000, 100=1%, 10=0.1%). switchDay=N은 '정산일 0~N-1일차에 100% 재순환 요청 → N일차부터 0%'.
+ * 시점 규칙일 뿐 실제 소각 횟수가 아니다(한도·가스·처분가능분 0이면 해당 일 소각 없음).
  * @returns {{type:string, recycleBps:number|null, switchDay:number|null, key:string, label:string}}
  */
 export function makePolicy({ type = 'ratio', ratio = null, switchDay = null } = {}) {
@@ -25,7 +26,8 @@ export function makePolicy({ type = 'ratio', ratio = null, switchDay = null } = 
   if (type === 'switch') {
     const n = Number(switchDay);
     if (!Number.isInteger(n) || n < 0) throw new RangeError('switchDay는 0 이상 정수');
-    return Object.freeze({ type, recycleBps: null, switchDay: n, key: `s:${n}`, label: `${n}회 전액 재소각 → 이후 전액 현금화` });
+    const label = n === 0 ? '0일차부터 전액 현금화(재소각 요청 없음)' : `처음 ${n}개 정산일(0~${n - 1}일차) 전액 재소각 요청 → ${n}일차부터 전액 현금화`;
+    return Object.freeze({ type, recycleBps: null, switchDay: n, key: `s:${n}`, label });
   }
   throw new RangeError(`알 수 없는 정책 type ${type}`);
 }
