@@ -259,3 +259,15 @@ test('partial fingerprint RPC failure is unavailable, not a persistent implement
  const recovered=await refreshLive({fetchImpl:mock,base:failed.snapshot,now:()=>FETCHED_MS});
  assert.notEqual(recovered.snapshot.meta.verification,'PENDING_VERIFICATION');
 });
+
+// Unknown turbine burn semantics must remain evidence-only, including when absent.
+test('터빈 소각 API 값은 누락과 0을 구분하고 엔진 수수료를 대체하지 않는다', () => {
+  const raw = structuredClone(saved.rawEvidence);
+  const original = snapshotFromEvidence(raw);
+  assert.equal(original.values.apiTurbineBurnBps.value, null);
+  const changed = structuredClone(original);
+  changed.values.apiTurbineBurnBps = { ...original.values.apiTurbineBurnBps, value: '150', status: 'OBSERVED' };
+  const checked = validateSnapshot(changed).snapshot;
+  assert.equal(checked.values.apiTurbineBurnBps.value, '150');
+  assert.equal(checked.values.turbineFeeBps.value, original.values.turbineFeeBps.value);
+});

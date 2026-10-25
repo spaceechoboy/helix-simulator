@@ -132,7 +132,9 @@ test('dual-axis SVG fits its container and keeps payback separate from milestone
   assert.notEqual(tooltip.textContent, middleText);
   hit.dispatch('pointerleave', {});
   assert.equal(tooltip.hidden, true);
-  hit.dispatch('pointerdown', { clientX: 222, pointerType: 'touch' });
+  hit.dispatch('pointerdown', { clientX: 222, clientY: 100, pointerType: 'touch', pointerId: 1, timeStamp: 10 });
+  assert.equal(tooltip.hidden, true);
+  hit.dispatch('pointerup', { clientX: 222, clientY: 100, pointerType: 'touch', pointerId: 1, timeStamp: 50 });
   assert.equal(tooltip.hidden, false);
   assert.match(tooltip.textContent, /고정됨/);
   assert.equal(chart.index, 2);
@@ -189,7 +191,86 @@ test('narrow 3-year chart staggers close milestone labels and preserves touch/ri
   assert.ok(Number(m6.getAttribute('y')) > markerBottom);
 
   const hit = byClass(svg, 'hit')[0];
-  hit.dispatch('pointerdown', { clientX: 302, pointerType: 'touch' });
+  hit.dispatch('pointerdown', { clientX: 302, clientY: 100, pointerType: 'touch', pointerId: 1, timeStamp: 10 });
+  hit.dispatch('pointerup', { clientX: 302, clientY: 100, pointerType: 'touch', pointerId: 1, timeStamp: 50 });
   assert.equal(chart.index, 1096);
   assert.deepEqual(pins, [1096]);
+});
+
+function fixture(t, hooks = {}, options = {}) {
+  const old = globalThis.document;
+  globalThis.document = { createElement: tag => new FakeElement(tag), createElementNS: (_ns, tag) => new FakeElement(tag) };
+  t.after(() => { globalThis.document = old; });
+  const root = new FakeElement('div'); root.clientWidth = options.width ?? 700;
+  const n = options.n ?? 61;
+  const chart = createSyncedCharts(root, { n, dates: options.dates ?? Array.from({length:n},(_,i)=>`D${i}`), markers: [], charts: [{ title:'현금', unit:'DAI', referenceValue:200, series:[{key:'cash',label:'현금 인출(계산)',cls:'s-teal',type:'step',values:Array.from({length:n},(_,i)=>i)}] }] }, hooks);
+  t.after(() => chart.destroy());
+  return { root, chart, svg: all(root).find(n=>n.tagName==='svg'), hit:byClass(root,'hit')[0], tooltip:all(root).find(n=>n.className==='chart-tooltip'), announcement:all(root).find(n=>n.className==='chart-announcement') };
+}
+
+test('touch scroll, cancel and long press do not pin, a short tap toggles pin', t => {
+  const pins=[]; const f=fixture(t,{onPin:i=>pins.push(i)});
+  const ev=(x,y,time)=>({clientX:x,clientY:y,timeStamp:time,pointerId:1,pointerType:'touch'});
+  f.hit.dispatch('pointerdown',ev(200,100,0)); f.hit.dispatch('pointermove',ev(200,130,20)); f.hit.dispatch('pointerup',ev(200,100,40));
+  f.hit.dispatch('pointerdown',ev(200,100,100)); f.hit.dispatch('pointercancel',ev(200,100,110)); f.hit.dispatch('pointerup',ev(200,100,120));
+  f.hit.dispatch('pointerdown',ev(200,100,200)); f.hit.dispatch('pointerup',ev(200,100,800));
+  assert.deepEqual(pins,[]);
+  f.hit.dispatch('pointerdown',ev(200,100,900)); f.hit.dispatch('pointerup',ev(200,100,950));
+  f.hit.dispatch('pointerdown',ev(200,100,1000)); f.hit.dispatch('pointerup',ev(200,100,1050));
+  assert.equal(pins.length,2); assert.equal(pins[1],null);
+});
+
+test('mouse hover remains silent; keyboard announces debounced and external date pins restore', async t => {
+  const f=fixture(t,{initialPinnedDate:'D20'});
+  assert.equal(f.chart.index,20); assert.match(f.tooltip.textContent,/고정됨/);
+  assert.equal(f.tooltip.getAttribute('aria-hidden'),'true');
+  assert.equal(f.tooltip.getAttribute('role'),null);
+  assert.equal(f.announcement.getAttribute('aria-live'),'polite');
+  f.chart.pin(null);
+  f.hit.dispatch('pointermove',{clientX:300,pointerType:'mouse'});
+  await new Promise(r=>setTimeout(r,320)); assert.equal(f.announcement.textContent,'');
+  const key=k=>f.svg.dispatch('keydown',{key:k,preventDefault(){}});
+  key('Home'); key('PageDown'); assert.equal(f.chart.index,30);
+  await new Promise(r=>setTimeout(r,320)); assert.match(f.announcement.textContent,/D30/);
+  key('End'); assert.equal(f.chart.index,60); key('PageUp'); assert.equal(f.chart.index,30);
+  key('Enter'); assert.match(f.tooltip.textContent,/고정됨/); key('Escape'); assert.equal(f.tooltip.hidden,true);
+  assert.equal(f.svg.getAttribute('height'),'420');
+  assert.equal(byClass(f.svg,'reference-line').length,1);
+  assert.ok(Number(byClass(f.svg,'reference-line')[0].getAttribute('y1'))>=0);
+});
+
+
+test('hover selects rendered SVG coordinates and clamps tooltip at both horizontal edges', t => {
+  for (const width of [200, 360, 700]) {
+    const f = fixture(t, {}, { width });
+    // A CSS-scaled SVG must map client coordinates back into its own viewBox.
+    f.svg.getBoundingClientRect = () => ({ left: 37, width: width / 2 });
+    f.hit.dispatch('pointermove', { pointerType:'mouse', clientX:37 + 58 / 2 });
+    assert.equal(f.tooltip.hidden,false);
+    assert.equal(f.chart.index,0);
+    assert.equal(Number.parseFloat(f.tooltip.style.left),0);
+    assert.match(f.tooltip.textContent,/^D0\n/);
+    f.hit.dispatch('pointermove', { pointerType:'mouse', clientX:37 + (width - 12) / 2 });
+    assert.equal(f.chart.index,60);
+    assert.match(f.tooltip.textContent,/^D60\n/);
+    const left=Number.parseFloat(f.tooltip.style.left);
+    assert.ok(left >= 0);
+    assert.ok(left + Math.min(280,width) <= width);
+    f.hit.dispatch('pointerleave',{});
+    assert.equal(f.tooltip.hidden,true);
+    f.chart.destroy();
+  }
+});
+
+test('pinned date restores by date rather than old index after ledger length changes', t => {
+  const first=fixture(t,{initialPinnedDate:'D20'});
+  assert.equal(first.chart.index,20);
+  const shortened=fixture(t,{initialPinnedDate:'D20'},{n:21,dates:Array.from({length:21},(_,i)=>`D${i+10}`)});
+  assert.equal(shortened.chart.index,10);
+  assert.equal(shortened.tooltip.hidden,false);
+  assert.match(shortened.tooltip.textContent,/^D20\n/);
+  const outside=fixture(t,{initialPinnedDate:'D20'},{n:10});
+  assert.equal(outside.chart.index,9);
+  assert.equal(outside.tooltip.hidden,true);
+  assert.doesNotMatch(outside.tooltip.textContent,/고정됨/);
 });

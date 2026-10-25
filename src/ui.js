@@ -247,6 +247,89 @@ export function compute(f0, snapshot, market = null, nowMs = Date.now()) {
   } catch (e) { return { errors: [`계산 불가: ${e.message}`], raw }; }
 }
 
+// ---- 기준 요약(3년 매일 현금화)과 전략 비교 분리 ----
+/** 기준 요약은 언제나 3년 · 재순환 0%(매일 현금화). 폼의 기간(horizonYears)은 전략 비교 기간 선택일 뿐이다. */
+export const BASELINE_YEARS = 3;
+export const BASELINE_POLICY = Object.freeze({ recycleBps: 0 });
+export const OPT_HORIZONS = Object.freeze([0.5, 1, 2, 3]);
+export const horizonLabel = (y) => (Number(y) === 0.5 ? '6개월' : `${y}년`);
+/** 폼 복사본에 기준 기간·정책을 덮는다(원본 폼 불변). */
+export const baselineForm = (f) => ({ ...f, horizonYears: String(BASELINE_YEARS), usage: 'sell', policyType: 'ratio', recyclePct: '0', switchDay: '0' });
+/** 기준 장부 계산. 전략 비교 기간·최적화 결과와 무관하게 같은 폼이면 같은 결과. */
+export function computeBaseline(f, snapshot, market = null, nowMs = Date.now()) {
+  return compute(baselineForm(f), snapshot, market, nowMs);
+}
+/** 폼에서 전략 비교 기간을 읽는다. 허용값 밖이면 3년. */
+export function optimizerHorizon(f) {
+  const y = Number(f?.horizonYears);
+  return OPT_HORIZONS.includes(y) ? y : BASELINE_YEARS;
+}
+
+/** 전략 탐색 요청의 동일성 키(정규화 시나리오 + 기간). 스냅샷은 객체 동일성으로 따로 비교한다. */
+export const strategyRequestKey = (req) => JSON.stringify({ scenario: req?.scenario ?? null, horizons: req?.horizons ?? null }, jsonReplacer);
+
+/**
+ * 최적화 결과 → 기준과 분리된 전략 비교. 폼·기준 장부를 바꾸지 않는다.
+ * maxRoi 승자의 전체 장부 재실행이 승자 값과 정확히 같을 때만 OK. 같은 기간·같은 시나리오(같은 예산·운전자금·가스)로
+ * 재순환 0% 장부를 따로 계산해 나란히 비교한다. 총투입(I)이 다르면 sameBudget=false로 표시한다.
+ */
+export function buildStrategyComparison(req, res, snapshot = req?.snapshot) {
+  const year = req?.horizons?.[0];
+  const g = res?.results?.find((x) => x.horizonYears === year) ?? null;
+  const metric = g?.winners?.maxRoi, winner = metric?.winner ?? null;
+  if (!winner) return { status: 'NO_WINNER', group: g };
+  const replay = metric.replayKey ? g.replays?.[metric.replayKey] : null;
+  const exact = replay?.verified === true && !!replay.full && ['I', 'W', 'net', 'paybackDay'].every((k) => replay.full.summary[k] === winner[k]);
+  if (!exact) return { status: 'REPLAY_MISMATCH', group: g };
+  const baseline = simulate(req.scenario, snapshot, BASELINE_POLICY);
+  const sb = baseline.summary, ss = replay.full.summary;
+  const sameBudget = sb.initialCapitalDai === ss.initialCapitalDai && sb.I === ss.I && (sb.topups ?? 0n) === 0n && (ss.topups ?? 0n) === 0n;
+  return {
+    status: 'OK', horizonYears: year, candidatesEvaluated: g.candidatesEvaluated, winner, plan: switchPlanView(replay.full, winner.policy),
+    strategy: replay.full, baseline, baselineReady: sb.modelCompleted === true && sb.resultClass !== 'INCOMPLETE' && !baseline.failed,
+    sameBudget, budget: req.scenario.totalBudgetDai ?? null, key: strategyRequestKey(req), snapshot,
+  };
+}
+/** 저장한 전략 비교가 현재 요청(같은 시나리오·기간·스냅샷 객체)에 그대로 해당하는지. 과거 조회값과 섞지 않는다. */
+export function strategyIsCurrent(cmp, req) {
+  return !!cmp && cmp.status === 'OK' && !!req && cmp.snapshot === req.snapshot && cmp.key === strategyRequestKey(req);
+}
+
+/** 장부 앞 n일만 남긴 보기(그래프 범위용). 마일스톤·회수일도 범위 안만. 늘리지 않는다. */
+export function sliceLedger(result, n) {
+  const d = result?.daily ?? [];
+  if (!result || n >= d.length) return result;
+  const sm = result.summary, pb = sm.paybackDay;
+  return { ...result, daily: d.slice(0, n), events: (result.events ?? []).filter((e) => e.day < n),
+    summary: { ...sm, milestones: (sm.milestones ?? []).filter((m) => m.record && m.record.day < n), paybackDay: pb !== null && pb !== undefined && pb < n ? pb : null } };
+}
+/** 그래프 표시 범위(2·3년). 장부가 더 짧으면(예: 1년 전략) 그 장부 끝에서 멈춘다(연장 추정 없음). */
+export function chartWindow(result, scenario, rangeYears) {
+  const y = Number(rangeYears);
+  if (!result || !scenario || ![2, 3].includes(y)) return result;
+  return sliceLedger(result, horizonDays(scenario.startDate, y, scenario.periodMode));
+}
+/** 고정한 날짜가 장부에 있으면 그 index, 없으면 null(숫자 숨김). */
+export function resolvePinnedIndex(daily, date) {
+  if (date === null || date === undefined) return null;
+  const i = (daily ?? []).findIndex((r) => r.date === date);
+  return i >= 0 ? i : null;
+}
+
+/**
+ * 입력 직후 항상 보이는 입력 POWER 한 줄. 값 종류(kind)와 출처를 구분한다.
+ *  CALCULATED: 관측/조회 전환율로 계산한 값 · ASSUMED: 가정 전환율 · POTENTIAL: 소각 한도 0으로 활성 아님 · UNAVAILABLE.
+ * 어느 경우도 체인에서 확인한 지급·활성 결과가 아니다.
+ */
+export function inputPowerView(out) {
+  if (!out || out.errors?.length || !out.quote) return null;
+  const q = out.quote, value = q.powerPreview ?? q.assumedPowerPreview ?? null;
+  if (value === null) return { value: null, kind: 'UNAVAILABLE', status: q.powerStatus ?? null, text: '입력 POWER 확정 불가', typeText: '전환율 또는 원가 확인 필요' };
+  const kind = q.routeStatus === 'BLOCKED_CAP0' ? 'POTENTIAL' : q.powerPreview === null || q.powerStatus === 'ASSUMED' ? 'ASSUMED' : 'CALCULATED';
+  const typeText = { POTENTIAL: '잠재값 · 소각 한도 0으로 활성 아님', ASSUMED: '계산값 · 가정 전환율', CALCULATED: `계산값 · 조회 전환율(${q.powerStatus ?? '?'})` }[kind];
+  return { value, kind, status: q.powerStatus ?? null, text: `입력 POWER ${fmtPower(value)}`, typeText };
+}
+
 /**
  * 비교·운전자금 탐색에 쓰는 총 초기예산. 입력이 없으면 현재 장부의 초기 투입
  * (원금+운전자금+가스 잔액, summary.initialCapitalDai)으로 고정한다. 원금 미확정이면 null.
@@ -324,23 +407,23 @@ export function chartModel(result, { roiView = false } = {}) {
   return {
     n: d.length, dailyDai: d.map(r => n18(r.emissionDai)), dates: d.map((r) => r.date ?? `D${r.day + 1}`), markers,
     charts: [
-      { id: 'cash-power', title: '누적 실제 현금 회수와 활성 POWER', unit: 'DAI', fmt: fmtD,
+      { id: 'cash-power', title: '누적 현금 인출(계산값)과 활성 POWER', unit: 'DAI', fmt: fmtD,
         rightAxis: { label: 'POWER', fmt: fmtD }, series: [
-        { key: 'cumWithdrawal', label: '누적 실제 현금', cls: 's-teal', type: 'step', values: d.map((r) => n18(r.cumWithdrawal)) },
+        { key: 'cumWithdrawal', label: '누적 현금 인출(계산값)', cls: 's-teal', type: 'step', values: d.map((r) => n18(r.cumWithdrawal)) },
         { key: 'cumEmissionDai', label: '누적 보상 DAI 가치', cls: 's-teal2', type: 'step', values: d.map((r) => n18(r.cumEmissionDai)) },
         { key: 'activePowerEnd', label: '활성 POWER', cls: 's-navy', type: 'step', axis: 'right', values: d.map((r) => n18(r.activePowerEnd)) },
       ] },
-      { id: 'daily', title: '하루 배출 DAI 가치와 하루 실제 현금', unit: 'DAI', fmt: fmtD, series: [
+      { id: 'daily', title: '하루 배출 DAI 가치와 하루 현금 인출(계산값)', unit: 'DAI', fmt: fmtD, series: [
         { key: 'emissionDai', label: '하루 배출 DAI 가치', cls: 's-teal2', type: 'step', values: d.map((r) => n18(r.emissionDai)) },
-        { key: 'withdrawal', label: '하루 실제 현금', cls: 's-navy', type: 'bar', values: d.map((r) => n18(r.externalWithdrawal - (r.endReturnDai ?? 0n))) },
+        { key: 'withdrawal', label: '하루 현금 인출(계산값)', cls: 's-navy', type: 'bar', values: d.map((r) => n18(r.externalWithdrawal - (r.endReturnDai ?? 0n))) },
       ] },
       roiView
         ? { id: 'roi', title: '현금 ROI (%)', fmt: (v) => `${fmtN(v, 0)}%`, series: [
           { key: 'roi', label: '현금 ROI', cls: 's-navy', type: 'step', values: d.map((r) => { const b = roiBpsOf(r.net, r.I); return b === null ? null : b / 100; }) },
         ] }
-        : { id: 'cum', title: '누적 투입 · 누적 현금 회수 · 현금 순손익 (DAI)', fmt: fmtD, series: [
+        : { id: 'cum', title: '누적 투입 · 누적 현금 인출(계산값) · 현금 순손익 (DAI)', fmt: fmtD, series: [
           { key: 'I', label: '누적 총투입', cls: 's-slate', type: 'step', values: d.map((r) => n18(r.I)) },
-          { key: 'cumWithdrawal', label: '누적 현금 회수', cls: 's-teal', type: 'step', values: d.map((r) => n18(r.cumWithdrawal)) },
+          { key: 'cumWithdrawal', label: '누적 현금 인출(계산값)', cls: 's-teal', type: 'step', values: d.map((r) => n18(r.cumWithdrawal)) },
           { key: 'net', label: '현금 순손익', cls: 's-navy', type: 'step', values: d.map((r) => n18(r.net)) },
         ] },
     ],
@@ -368,8 +451,11 @@ export function ledgerToCsv(daily) {
   return '﻿' + [head, ...daily.map((r) => LEDGER_COLUMNS.map((c) => csvCell(cellRaw(r, c))).join(','))].join('\n') + '\n';
 }
 export const jsonReplacer = (_k, v) => (typeof v === 'bigint' ? v.toString() : typeof v === 'function' ? undefined : v);
-export function buildExport({ raw, scenario, quote, result, policy, snapshot, changelog, budget, marketUse, market }) {
+export function buildExport({ raw, scenario, quote, result, policy, snapshot, changelog, budget, marketUse, market, strategy = null }) {
   return {
+    // 본문(summary/daily)은 기준 장부. 전략 비교는 별도 필드로만 싣는다(기준을 대체하지 않음).
+    strategyComparison: strategy ? { horizonYears: strategy.horizonYears, policy: strategy.winner.policy, policyLabel: strategy.plan.label, sameBudget: strategy.sameBudget,
+      baselineReady: strategy.baselineReady, strategySummary: strategy.strategy.summary, sameHorizonBaselineSummary: strategy.baseline.summary } : null,
     marketUse: marketUse ?? null,
     market: market ? { mode: market.mode, fetchedAt: market.fetchedAt, note: market.note, legs: market.legs } : null,
     exportVersion: 'helix-sim-export/1', generatedAt: new Date().toISOString(),
@@ -398,9 +484,9 @@ export function derive(result) {
 /** 셀렉터 비교 행(고정 후보; 최적화 아님). */
 export const QUICK_POLICIES = [{ recycleBps: 0 }, { recycleBps: 5000 }, { recycleBps: 10000 }];
 
-/** 3·6·12개월 카드(같은 장부의 마일스톤 행). 2·3년은 자세히 표에만. */
+/** 3·6·12개월 카드(같은 장부의 마일스톤 행). 18·24·36개월은 자세히 표에만. */
 export function milestoneCards(result) {
-  return result.summary.milestones.filter((m) => m.months <= 24).map((m) => ({ label: m.label, date: m.record?.date ?? m.date, periodEnd: m.date, record: m.record ?? null }));
+  return result.summary.milestones.filter((m) => m.months <= 12).map((m) => ({ label: m.label, date: m.record?.date ?? m.date, periodEnd: m.date, record: m.record ?? null }));
 }
 
 /**
@@ -494,9 +580,11 @@ const $ = (id) => document.getElementById(id);
 const st = { snapshot: null, pending: null, out: null, charts: null, cursor: 0, pinned: null, changelog: [], prevFlat: null,
   market: { loading: true, legs: {} }, pendingMarket: null, liveLoading: false, fingerprintBaseline: PROTOCOL_BASELINE.fingerprint, startDateEdited: false,
   roiView: false, showMsDetail: false, tab: 0, ledgerPage: 0, evByDay: new Map(), inputValid: false,
+  chartMode: 'baseline', chartRange: 3, pinnedDate: null, view: null,
   reserveAdvice: { job: 0, out: null, status: 'idle', plan: null },
   reserveAuto: { dirty: true },
-  opt: { client: null, running: false, result: null, status: '', mainJob: 0, signal: null, hasRun: false, applied: null, rerunTimer: null } };
+  // applied: 검산을 통과한 전략 비교(buildStrategyComparison). 폼·st.out(기준)에 쓰지 않는다. request: 탐색 시작 시 요청.
+  opt: { client: null, running: false, result: null, status: '', mainJob: 0, signal: null, hasRun: false, applied: null, request: null, rerunTimer: null } };
 
 function readForm() {
   const form = $('inputs'), f = {};
@@ -515,7 +603,7 @@ const setField = (name, value) => {
 
 function syncVisibility(f) {
   const form = $('inputs');
-  const show = (sel, ok) => form.querySelectorAll(sel).forEach((n) => { n.hidden = !ok(n); });
+  const show = (sel, ok) => document.querySelectorAll(`.layout ${sel}`).forEach((n) => { n.hidden = !ok(n); });
   show('[data-show]', (n) => n.dataset.show === f.asset);
   const costSelect = form.elements.costBasis;
   if (costSelect) {
@@ -555,10 +643,10 @@ function renderReserveLine(f = readForm(), out = null) {
   const box = $('example-line'); if (!box) return;
   const rs = reserveSummary(f), mode = reserveModeOf(f);
   const current = out?.result?.summary?.initialCapitalDai ?? null;
-  const autoState = mode === 'AUTO' && st.reserveAdvice.out === out && st.reserveAdvice.status === 'loading' ? ' · 금액·기간 기준 재산정 중' : '';
+  const autoState = mode === 'AUTO' && st.reserveAdvice.out === out && st.reserveAdvice.status === 'loading' ? ' · 금액 기준 재산정 중' : '';
   const total = current !== null ? ` · 현재 총투입 ${fmtDai(current)}` : '';
   box.innerHTML = `<b>운전자금 ${mode}</b>${autoState} · 원금과 별도 ${esc(fmtN(rs.reserve, 2))} DAI + Anubis 가스 ${esc(fmtN(rs.gas, 2))} DAI${total}<br>
-    <small>${mode === 'AUTO' ? '현재 매일 받기 경로와 선택 기간을 끝까지 실행하는 조건부 탐색값입니다. 전체 전략의 최소값은 아닙니다.' : '직접 입력값을 그대로 사용합니다.'} 중간 외부 추가 입금은 사용하지 않습니다.</small>
+    <small>${mode === 'AUTO' ? '3년 매일 현금화 기준 장부를 끝까지 실행하는 조건부 탐색값입니다. 전략 비교에도 같은 값을 쓰며, 전체 전략의 최소값은 아닙니다.' : '직접 입력값을 그대로 사용합니다.'} 중간 외부 추가 입금은 사용하지 않습니다.</small>
     <button type="button" class="link" data-open-settings="reserveDai">세부 설정</button>`;
 }
 
@@ -591,7 +679,7 @@ function renderLgnsStatus() {
 function openSettings(name) {
   $('input-details').open = true;
   const d = $('settings'); d.open = true;
-  const el = name ? $('inputs').querySelector(`[name="${name}"]`) : null;
+  const el = name ? $('inputs').elements.namedItem(name) : null;
   if (el && !el.closest('[hidden]')) { el.scrollIntoView({ block: 'center' }); el.focus({ preventScroll: true }); }
   else d.scrollIntoView({ block: 'start' });
 }
@@ -703,7 +791,7 @@ function invalidateReserveAdvice() {
 function reserveAdviceMarkup() {
   const a = st.reserveAdvice;
   if (a.out !== st.out || a.status === 'idle') return '';
-  if (a.status === 'loading') return '<div class="reserve-advice pending"><b>금액에 맞는 운전자금 추정 중…</b><small>선택 기간 전체를 다시 실행해 처리 보류가 없는지 확인합니다.</small></div>';
+  if (a.status === 'loading') return '<div class="reserve-advice pending"><b>금액에 맞는 운전자금 추정 중…</b><small>3년 기준 장부 전체를 다시 실행해 처리 보류가 없는지 확인합니다.</small></div>';
   const p = a.plan;
   if (p?.status !== 'OK') {
     const why = p?.status === 'SEARCH_LIMIT' ? '정해 둔 탐색 범위 안에서 완료 값을 찾지 못했습니다.'
@@ -719,7 +807,7 @@ function reserveAdviceMarkup() {
   return `<div class="reserve-advice"><b>운전자금 추정 ${fmtDai(p.reserveDai)}</b>
     <span>현재 운전자금 ${fmtDai(p.currentReserve)} · 추가 준비금 ${fmtDai(p.additionalReserve)}${krw(p.additionalReserve)}</span>
     <span>적용 후 총투입 ${fmtDai(p.projectedTotal)}${krw(p.projectedTotal)}</span>
-    <small>진입 원금에서 차감하지 않는 별도 준비금입니다. 현재 ${esc(policyReadable(st.out.policy))} 경로·선택 기간 전체 재실행 완료, 외부 추가 입금 0. 모든 전략의 최소 준비금이 아닌 조건부 추정값이며 실제 필요액을 보장하지 않습니다.</small>
+    <small>진입 원금에서 차감하지 않는 별도 준비금입니다. 현재 ${esc(policyReadable(st.out.policy))} 경로·3년 전체 재실행 완료, 외부 추가 입금 0. 모든 전략의 최소 준비금이 아닌 조건부 추정값이며 실제 필요액을 보장하지 않습니다.</small>
     ${budgetNote}${auto ? '<small>자동 모드에서 검산 후 반영합니다.</small>' : '<button type="button" data-apply-auto-reserve>이 운전자금 적용</button>'}</div>`;
 }
 
@@ -769,15 +857,21 @@ function recompute({ preserveOptimizer = false } = {}) {
   }
   syncVisibility(f);
   st.inputValid = false;
-  const out = compute(f, st.snapshot ?? validateSnapshot({ mode: 'MANUAL', meta: {}, values: {} }).snapshot, st.market);
+  // 기준 요약은 폼 기간과 무관하게 3년 매일 현금화. 전략 비교 기간은 optimizeRequest에서만 쓴다.
+  const out = computeBaseline(f, st.snapshot ?? validateSnapshot({ mode: 'MANUAL', meta: {}, values: {} }).snapshot, st.market);
   const errBox = $('input-errors');
   renderConversion(out);
+  renderInputPower(out);
   renderQuickSummary(out);
   renderMarketStrip();
   if (out.errors.length) {
     cancelOptimizer('최신 데이터 확인 후 다시 비교합니다.'); st.opt.applied = null;
+    // 이전 장부의 고정 날짜·커서 숫자를 남기지 않는다.
+    if ($('detail')) $('detail').hidden = true;
+    if ($('readout')) $('readout').innerHTML = '<p class="hint">입력 확인 필요 — 숫자를 표시하지 않습니다.</p>';
+    syncChartControls();
     errBox.innerHTML = st.liveLoading && !st.out ? '<b>최신 시세와 프로토콜 값을 확인하고 있습니다…</b>' : `<b>입력·최신 데이터 확인 필요</b><p>${esc(out.errors[0])}</p><details><summary>확인할 항목 ${out.errors.length}개</summary><ul>${out.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></details>`;
-    document.querySelectorAll('.results > .card:not(.results-summary):not(.strategy)').forEach((c) => c.classList.add('stale-result'));
+    document.querySelectorAll('.results > .chart-card, .results > .disclosure, .results > .more').forEach((c) => c.classList.add('stale-result'));
     renderLgnsStatus();
     renderCompare();
     return false;
@@ -790,9 +884,8 @@ function recompute({ preserveOptimizer = false } = {}) {
   st.out = out;
   st.inputValid = true;
   $('minreserve-out').textContent = '';
-  st.evByDay = new Map();
-  for (const e of out.result.events) { if (!st.evByDay.has(e.day)) st.evByDay.set(e.day, []); st.evByDay.get(e.day).push(e); }
-  st.pinned = null; st.ledgerPage = 0;
+  // 고정 날짜(st.pinnedDate)는 유지하고, renderCharts가 새 장부에서 같은 날짜를 찾는다(없으면 해제).
+  st.ledgerPage = 0;
   scheduleReserveAdvice(out);
   renderAll();
   return true;
@@ -831,6 +924,13 @@ function renderConversion(out) {
   box.dataset.asset = f.asset;
 }
 
+function renderInputPower(out) {
+  const box = $('input-power'); if (!box) return;
+  const v = inputPowerView(out);
+  box.dataset.kind = v?.kind ?? 'INPUT';
+  box.innerHTML = v ? `<b>${esc(v.text)}</b> <small>${esc(v.typeText)}</small>` : '<small>입력 POWER: 입력 확인 필요</small>';
+}
+
 function renderQuickSummary(out) {
   const box = $('quick-summary'); if (!box) return;
   const state = cashPresentation(out);
@@ -840,8 +940,9 @@ function renderQuickSummary(out) {
   }
   const rows = quickSummaryRows(out);
   if (!rows) { box.innerHTML = `<p class="qs-empty">입력 확인 필요 — ${esc(out.errors?.[0] ?? '값을 확인하세요')}</p>`; return; }
-  const basis = st.opt.applied?.plan?.label ?? (out.policy?.switchDay > 0 ? `${out.policy.switchDay}일 전환 전략 · 최신 조건 재계산(최대 효율 비교 중)` : '매일 받기 비교 기준');
-  box.innerHTML = `<p class="section-kicker">${esc(basis)}</p><table class="qs"><thead><tr><th>기간</th><th>누적 실제 현금</th><th>현금 ROI</th></tr></thead><tbody>${rows.map((r) => (r.available
+  // 기준 요약: 전략 비교 결과·기간과 무관하게 3년 매일 현금화 장부.
+  const basis = `${horizonLabel(BASELINE_YEARS)} 매일 현금화 기준 (전략 비교와 별도)`;
+  box.innerHTML = `<p class="section-kicker">${esc(basis)}</p><table class="qs"><thead><tr><th>기간</th><th>누적 현금 인출(계산값)</th><th>현금 ROI</th></tr></thead><tbody>${rows.map((r) => (r.available
     ? `<tr><th scope="row">${esc(r.label)}</th><td><b>${esc(r.primary)}</b>${r.secondary ? `<small>${esc(r.secondary)}</small>` : ''}</td><td class="${r.roiBps !== null && r.roiBps < 0 ? 'neg' : ''}"><b>${esc(r.roi)}</b></td></tr>`
     : `<tr><th scope="row">${esc(r.label)}</th><td colspan="2">기간 밖</td></tr>`)).join('')}</tbody></table>`
     + `<p class="qs-basis">${esc(quickSummaryBasis(out)?.text ?? '')}</p>`
@@ -860,7 +961,7 @@ function renderFeePanel() {
   const pool = { value: Number(s.engine.poolFeeBps), source: '시나리오 가정' };
   const fee = (name, x) => `<div><small>${name}</small><b>${x.value === null ? 'N/A' : fmtBpsPct(x.value)}</b><span>${esc(x.source)}</span></div>`;
   box.innerHTML = `<div class="fee-grid">${fee('터빈 수수료', turbine)}${fee('AiLGNS 매도세', sell)}${fee('풀 수수료', pool)}</div>
-    <p>터빈·매도세 관측 기준 ${esc(kstTime(snap?.meta?.fetchedAt))}. 풀 0.30%는 관측값과 분리한 시나리오입니다. 터빈 크레딧은 활성화 전에 같은 수량의 AiLGNS를 먼저 사야 하므로 첫 처리에는 준비 DAI가 필요합니다.</p>`;
+    <p>API 터빈 소각 항목: ${snap?.values?.apiTurbineBurnBps?.value == null ? '미조회' : `${fmtBpsPct(Number(snap.values.apiTurbineBurnBps.value))}`} · 수령자 영향 미확인 · 계산 미반영.</p><p>터빈·매도세 관측 기준 ${esc(kstTime(snap?.meta?.fetchedAt))}. 풀 0.30%는 관측값과 분리한 시나리오입니다. 터빈 크레딧은 활성화 전에 같은 수량의 AiLGNS를 먼저 사야 하므로 첫 처리에는 준비 DAI가 필요합니다.</p>`;
 }
 
 const LEG_ROWS = [['fx', 'DAI/KRW', (v) => `${fmtN(toNum(v), 1)}원`], ['ailgns', 'AiLGNS', (v) => `${fmtN(toNum(v), 2)} DAI`]];
@@ -900,7 +1001,7 @@ function marketDetailHtml(m) {
 }
 
 function renderAll() {
-  renderConversion(st.out); renderQuickSummary(st.out); renderEntry(); renderKpi(); renderCharts(); renderMilestones(); renderDaySamples();
+  renderConversion(st.out); renderInputPower(st.out); renderQuickSummary(st.out); renderEntry(); renderKpi(); renderCharts(); renderMilestones(); renderDaySamples();
   renderUnrealized(); renderCompare(); renderMore(); renderLgnsStatus(); renderMarketStrip(); renderFeePanel(); renderReserveLine(readForm(), st.out);
 }
 
@@ -974,7 +1075,7 @@ function renderKpi() {
   const aiBasis = st.out.marketUse?.ailgns?.source === 'SPOT' ? '조회 spot 기준 환산'
     : st.out.marketUse?.ailgns?.source === 'SAVED_TWAP' ? '저장 TWAP 기준 환산' : '계산 기준 가격 환산';
   $('kpi').innerHTML = `<div class="hero">
-    <div class="hero-main"><small>${years} 동안 받는 현금</small><strong>${fmtDai(sm.W, 0)}</strong>
+    <div class="hero-main"><small>${years} 매일 현금화 기준 · 현금 인출 합계(계산값)</small><strong>${fmtDai(sm.W, 0)}</strong>
       <span>총투입 ${fmtDai(sm.I, 0)}${krw(sm.I) ? ` (${krw(sm.I)})` : ''}</span></div>
     <div class="stats">
       ${stat('순이익', fmtDai(sm.net, 0), krw(sm.net), sm.net !== null && sm.net < 0n)}
@@ -984,49 +1085,100 @@ function renderKpi() {
     </div></div>
     ${blocks.length ? `<div class="block-msg" role="status">${blocks.join('<br>')}</div>` : ''}
     <div class="hint" role="note" aria-label="원금 회수일이 다른 이유">
-      <strong>받은 가치와 실제 원금 회수일은 왜 다른가요?</strong>
+      <strong>받은 가치와 계산상 원금 회수일은 왜 다른가요?</strong>
       <p>‘받은 가치’만으로 계산한 날짜는 누적 AiLGNS 보상의 DAI 평가액이 처음 넣은 원금에 도달한 날입니다. 아직 현금으로 회수한 금액은 아닙니다.</p>
-      <p>터빈 재순환에서는 보상 일부를 팔아 터빈 비용·매도세·풀 수수료·가스를 충당하고, 남은 보상을 다시 소각해 POWER로 바꿉니다. 재소각한 금액은 현금 회수에 포함하지 않으므로, 보상 평가액이 원금을 넘어도 실제 회수는 늦어질 수 있습니다.</p>
-      <p>이 계산기의 ‘원금 회수’는 밖으로 받은 누적 현금이 원금과 준비금(운전자금·가스)을 합친 총투입액에 도달한 날입니다. 재순환은 이후 보상 규모에도 영향을 주므로, 재투자를 멈추는 날짜와 수수료에 따라 회수 일정이 달라집니다.</p>
+      <p>터빈 재순환에서는 보상 일부를 팔아 터빈 비용·매도세·풀 수수료·가스를 충당하고, 남은 보상을 다시 소각해 POWER로 바꿉니다. 재소각한 금액은 현금 회수에 포함하지 않으므로, 보상 평가액이 원금을 넘어도 계산상 회수는 늦어질 수 있습니다.</p>
+      <p>이 계산기의 ‘원금 회수’는 누적 현금 인출(계산값)이 원금과 준비금(운전자금·가스)을 합친 총투입액에 도달한 날입니다. 재순환은 이후 보상 규모에도 영향을 주므로, 재투자를 멈추는 날짜와 수수료에 따라 회수 일정이 달라집니다.</p>
     </div>
     <p class="status">${esc(status.text)} · ${esc(policyLabel(policy))}${sm.endReturnDai > 0n ? ` · 마지막 날 돌려받는 준비금 ${fmtDai(sm.endReturnDai, 0)} 포함` : ''}.
-    현금 수익률의 총투입은 원금+운전자금+가스이며, 누적 배출 가치는 실제 현금과 다릅니다. 선택 기간은 만기·환불일이 아닙니다. 현재 조건 유지 가정(실제 거래 미검증).${rate ? ' 원화는 같은 환율 가정.' : ''}
+    현금 수익률의 총투입은 원금+운전자금+가스이며, 누적 배출 가치는 현금 인출(계산값)과 다릅니다. 이 요약은 전략 비교 기간과 무관한 3년 매일 현금화 기준이며, 기간은 만기·환불일이 아닙니다. 현금 인출은 모형 계산값이며 지급 확인값이 아닙니다. 현재 조건 유지 가정(실제 거래 미검증).${rate ? ' 원화는 같은 환율 가정.' : ''}
     ${st.out.marketUse?.ailgns ? `AiLGNS 가격: ${esc({ SPOT: `실시간 풀 spot(${kstTimeShort(st.out.marketUse.ailgns.fetchedAt)}) 고정`, SAVED_TWAP: '저장 Oracle TWAP 고정', USER: '직접 입력 고정' }[st.out.marketUse.ailgns.source] ?? '')}.` : ''}</p>`;
 }
 
 // ---- E. 차트·커서 ----
+/** 현재 요청과 일치하는 검산 전략 비교만 돌려준다(입력·기간·스냅샷이 바뀌면 null). */
+function currentStrategyRequest() {
+  return st.out?.scenario ? optimizeRequest(st.out, st.snapshot, optimizerHorizon(readForm())) : null;
+}
+function currentStrategy() {
+  const a = st.opt.applied;
+  return st.inputValid && a && strategyIsCurrent(a, currentStrategyRequest()) ? a : null;
+}
+/** 그래프 기준(매일 현금화/전환 전략)과 표시 범위. 그래프·커서·상세·장부·대표 일자가 같은 보기를 읽는다. */
+function viewState() {
+  const a = st.chartMode === 'strategy' ? currentStrategy() : null;
+  const full = a ? a.strategy : st.out.result;
+  const sm = full.summary;
+  return { mode: a ? 'strategy' : 'baseline', full, result: chartWindow(full, st.out.scenario, st.chartRange),
+    horizonYears: a ? a.horizonYears : BASELINE_YEARS, label: a ? `${horizonLabel(a.horizonYears)} ${a.plan.label}` : `${horizonLabel(BASELINE_YEARS)} 매일 현금화`,
+    ready: a ? sm.modelCompleted === true && sm.resultClass !== 'INCOMPLETE' && !full.failed : cashResultReady(st.out) };
+}
+function syncChartControls() {
+  const a = currentStrategy();
+  // Keep requested strategy mode while fresh results are being recomputed.
+  const mode = $('chart-mode'), range = $('chart-range');
+  if (mode) {
+    const opt = mode.querySelector('option[value="strategy"]');
+    if (opt) { opt.disabled = !a; opt.textContent = a ? `전환 전략 (${horizonLabel(a.horizonYears)})` : '전환 전략 (계산 후)'; }
+    mode.value = st.chartMode;
+  }
+  if (range) range.value = String(st.chartRange);
+}
+function renderViewAreas() {
+  if (!st.inputValid || !st.out?.result) { syncChartControls(); return; }
+  if (st.chartMode === 'strategy' && !currentStrategy()) { renderCharts(); renderDaySamples(); renderUnrealized(); renderLedger(); return; }
+  renderCharts(); renderDaySamples(); renderUnrealized();
+  if ($('d-ledger').open) renderLedger(true);
+}
 function renderCharts() {
-  st.charts?.destroy();
-  const ready = cashResultReady(st.out);
+  st.charts?.destroy(); st.charts = null;
+  syncChartControls();
+  if (st.chartMode === 'strategy' && !currentStrategy()) {
+    $('charts').innerHTML = '<p class="hint">최신 입력으로 전략을 다시 계산하면 그래프를 표시합니다.</p>';
+    $('readout').innerHTML = ''; $('detail').hidden = true;
+    $('chart-status').textContent = '전환 전략 대기 · 이전 수치 표시 안 함';
+    st.view = null; return;
+  }
+  const v = st.view = viewState();
+  st.evByDay = new Map();
+  for (const e of v.result.events ?? []) { if (!st.evByDay.has(e.day)) st.evByDay.set(e.day, []); st.evByDay.get(e.day).push(e); }
   const chartStatus = $('chart-status');
   if (chartStatus) {
-    chartStatus.className = ready ? 'chart-status' : 'chart-status warn';
-    chartStatus.textContent = ready ? '' : '처리 보류 중 장부입니다. 원인 확인용이며 정상 현금 수익 예측이 아닙니다.';
+    chartStatus.className = v.ready ? 'chart-status' : 'chart-status warn';
+    chartStatus.textContent = !v.ready ? '처리 보류 중 장부입니다. 원인 확인용이며 정상 현금 수익 예측이 아닙니다.'
+      : v.mode === 'strategy' ? `${v.label} 장부 · ${horizonLabel(v.horizonYears)}에서 끝남(연장 추정 없음). 위 기준 요약은 3년 매일 현금화 그대로입니다.`
+        : `${v.label} 기준 장부.`;
   }
-  const full = chartModel(st.out.result, { roiView: st.roiView });
-  if (!full.n) { $('charts').innerHTML = '<p class="hint">표시할 장부가 없습니다.</p>'; return; }
+  const full = chartModel(v.result, { roiView: st.roiView });
+  st.pinned = resolvePinnedIndex(v.result.daily, st.pinnedDate);
+  if (st.pinned === null) st.pinnedDate = null;
+  if (!full.n) { $('charts').innerHTML = '<p class="hint">표시할 장부가 없습니다.</p>'; renderDetail(); return; }
   const model = singleChartModel(full, 0);
+  model.charts[0].referenceValue = v.full.summary.I == null ? null : toNum(v.full.summary.I);
+  model.charts[0].referenceLabel = '총투입';
   st.charts = createSyncedCharts($('charts'), model, {
+    initialPinnedDate: st.pinned === null ? null : model.dates[st.pinned],
     onCursor: (i) => { st.cursor = i; renderReadout(i); },
-    onPin: (i) => { st.pinned = i; renderDetail(); if ($('d-ledger').open) renderLedger(true); },
+    onPin: (i) => { st.pinned = i; st.pinnedDate = i === null ? null : st.view?.result.daily[i]?.date ?? null; renderDetail(); if ($('d-ledger').open) renderLedger(true); },
   });
+  renderDetail();
 }
 function renderReadout(i) {
-  const r = st.out.result.daily[i]; if (!r) return;
+  const v = st.view, r = v?.result.daily[i]; if (!r) return;
   const roi = roiBpsOf(r.net, r.I);
-  const cell = (t, v) => `<div><span>${t}</span><b>${v}</b></div>`;
+  const cell = (t, x) => `<div><span>${t}</span><b>${x}</b></div>`;
   const tm = recordTiming(r, st.out.scenario.startDate);
-  $('readout').innerHTML = cell('정산일 · 회차 · 경과', `${r.date ?? ''} · ${tm.settlementNo}회 · ${tm.elapsed ?? '?'}일`) + cell('배출 DAI 가치', fmtDai(r.emissionDai))
-    + cell('하루 실제 현금', fmtDai(r.externalWithdrawal - (r.endReturnDai ?? 0n))) + cell('활성 Power', fmtPower(r.activePowerEnd))
-    + cell('대기 Power', fmtPower(r.pendingPower)) + cell('누적 순손익 · ROI', cashResultReady(st.out) ? `${fmtDai(r.net, 0)} · ${fmtBpsPct(roi)}` : '계산 보류');
+  $('readout').innerHTML = cell('장부', esc(v.label)) + cell('정산일 · 회차 · 경과', `${r.date ?? ''} · ${tm.settlementNo}회 · ${tm.elapsed ?? '?'}일`) + cell('배출 DAI 가치', fmtDai(r.emissionDai))
+    + cell('하루 현금 인출(계산값)', fmtDai(r.externalWithdrawal - (r.endReturnDai ?? 0n))) + cell('활성 Power', fmtPower(r.activePowerEnd))
+    + cell('대기 Power', fmtPower(r.pendingPower)) + cell('누적 순손익 · ROI', v.ready ? `${fmtDai(r.net, 0)} · ${fmtBpsPct(roi)}` : '계산 보류');
 }
 const EV_LABEL = { ENTRY_DAI: 'DAI 진입', ACTIVATE: 'Power 활성', TURBINE: '터빈 활성화', TURBINE_HOLD: '터빈 보류', SALE: '매도', WITHDRAW: '외부 인출', REBURN: '재소각',
   BURN_BLOCKED: '재소각 차단', EXTERNAL_TOPUP: '외부 투입', END_RETURN: '종료 반환', FIXED_BURN_POLYGON: 'FIXED 소각(Polygon)', FIXED_PAYOUT: 'FIXED 지급', FIXED_CLAIM: 'FIXED 청구',
   FIXED_STOPPED: 'FIXED 중단', FIXED_CAP_REACHED: 'FIXED 상한 도달', HELIX_LGNS_BURN: 'HELIX LGNS 소각' };
 function renderDetail() {
-  const box = $('detail'), i = st.pinned;
-  if (i === null || !st.out.result.daily[i]) { box.hidden = true; return; }
-  const r = st.out.result.daily[i], roi = roiBpsOf(r.net, r.I);
+  const box = $('detail'), i = st.pinned, daily = st.inputValid ? st.view?.result.daily ?? [] : [];
+  if (i === null || !daily[i]) { box.hidden = true; return; }
+  const r = daily[i], roi = roiBpsOf(r.net, r.I);
   const rows = [
     ['정산일 · 회차 · 시작 후 경과', recordTiming(r, st.out.scenario.startDate).text], ['AiLGNS 가격(시나리오)', fmtDai(r.price, 4)],
     ['기초 활성 Power', fmtPower(r.activePowerStart)], ['신규 활성 Power', fmtPower(r.newActivePower)], ['소진 Power', fmtPower(r.consumedPower)],
@@ -1039,19 +1191,27 @@ function renderDetail() {
     ['reserve 목표', fmtDai(r.reserveTargetDai)], ['재소각', `${fmtTok(r.burnTokens)} → ${fmtPower(r.newPendingPower)}`],
     ['요청 · 실행 재순환', `${fmtBpsPct(r.requestedRecycleBps)} · ${fmtBpsPct(r.executedRecycleBps)}`],
     ['외부 투입', fmtDai(r.externalTopup)], ['외부 인출', fmtDai(r.externalWithdrawal)], ['내부 DAI', fmtDai(r.cash)], ['Anubis 가스 잔액', fmtDai(r.nativeAnubis, 4)],
-    ['누적 현금 회수', fmtDai(r.cumWithdrawal)], ['누적 총투입', fmtDai(r.I)], ['현금 순이익', fmtDai(r.net)], ['현금 ROI', fmtBpsPct(roi)],
+    ['누적 현금 인출(계산값)', fmtDai(r.cumWithdrawal)], ['누적 총투입', fmtDai(r.I)], ['현금 순이익', fmtDai(r.net)], ['현금 ROI', fmtBpsPct(roi)],
     ['원금 회수 상태', r.I === null ? 'N/A' : r.cumWithdrawal >= r.I ? '회수' : `미회수 ${fmtDai(r.unrecovered)}`],
   ];
   if (r.fixed) rows.push(['FIXED 누적 지급(인정 DAI)', fmtDai(r.fixed.paidDai)], ['FIXED 미청구', fmtTok(r.fixed.unclaimedLgns, 'LGNS', 9)], ['HELIX 소각 대기 LGNS', fmtTok(r.lgnsWaiting, 'LGNS', 9)]);
   const evs = (st.evByDay.get(i) ?? []).map((e) => EV_LABEL[e.type] ?? e.type);
   const flags = [r.gasShort && '가스 부족', r.reserveShort && 'reserve 부족', r.heldCredits > 0n && '터빈 보류'].filter(Boolean);
   box.hidden = false;
-  box.innerHTML = `<h3>${esc(r.date)} 상세 (고정됨 · Esc 해제)</h3><dl>${rows.map(([t, v]) => `<div><dt>${t}</dt><dd>${v}</dd></div>`).join('')}</dl>
+  box.innerHTML = `<h3>${esc(r.date)} 상세 · ${esc(st.view.label)} (고정됨 · Esc 해제)</h3><dl>${rows.map(([t, v]) => `<div><dt>${t}</dt><dd>${v}</dd></div>`).join('')}</dl>
     <p class="hint">사건: ${esc(evs.join(', ') || '없음')}${flags.length ? ` · <span class="warn">${esc(flags.join(', '))}</span>` : ''} · 사건 순서·편입 규칙은 가정.</p>`;
 }
 
-// ---- F. 3·6·12개월 (선택 horizon 단일 장부에서 읽음) ----
-function jumpTo(i) { if (!st.charts) return; st.charts.setCursor(i); st.charts.pin(i); $('charts').scrollIntoView({ block: 'nearest' }); }
+// ---- F. 3·6·12개월 (항상 3년 매일 현금화 기준 장부에서 읽음) ----
+/** baseline=true: 기준 장부 행. 그래프가 전략 보기이거나 범위 밖이면 기준 3년 보기로 돌린 뒤 고정한다. */
+function jumpTo(i, { baseline = false } = {}) {
+  if (baseline && (st.chartMode !== 'baseline' || !st.view || i >= st.view.result.daily.length)) {
+    st.chartMode = 'baseline';
+    if (i >= chartWindow(st.out.result, st.out.scenario, st.chartRange).daily.length) st.chartRange = 3;
+    renderViewAreas();
+  }
+  if (!st.charts) return; st.charts.setCursor(i); st.charts.pin(i); $('charts').scrollIntoView({ block: 'nearest' });
+}
 function renderMilestones() {
   const { result } = st.out, dv = derive(result), det = st.showMsDetail;
   if (!cashResultReady(st.out)) {
@@ -1059,7 +1219,7 @@ function renderMilestones() {
       <p class="hint">미완료 장부의 0원·음수 ROI는 정상 성과가 아니므로 기간별 결과를 표시하지 않습니다.</p>`;
     return;
   }
-  const head = ['기간 · 마지막 정산일', '기준 정산(장부 행)', '누적 배출 DAI 가치', '누적 총투입', '누적 외부 회수', '현금 순이익', 'ROI', '미회수 원금', ...(det ? ['정산 횟수', '내부 DAI', '잠금 AiLGNS', '대기 Power'] : [])];
+  const head = ['기간 · 마지막 정산일', '기준 정산(장부 행)', '누적 배출 DAI 가치', '누적 총투입', '누적 현금 인출(계산값)', '현금 순이익', 'ROI', '미회수 원금', ...(det ? ['정산 횟수', '내부 DAI', '잠금 AiLGNS', '대기 Power'] : [])];
   const rows = result.summary.milestones.map((m) => {
     const r = m.record;
     if (!r) return `<tr><td>${esc(m.label)} · ${esc(m.date)}</td><td colspan="${head.length - 1}">장부 미도달</td></tr>`;
@@ -1080,44 +1240,47 @@ function renderMilestones() {
         <span class="ms-sub">순이익 ${fmtDai(c.record.net, 0)}</span>
       </button>`;
   }).join('');
-  $('milestones').innerHTML = `<h2 class="desktop-only">기간별 받은 현금</h2><div class="ms-cards desktop-only">${cards}</div>
-    <details class="ms-more" id="ms-more" ${st.msOpen ? 'open' : ''}><summary>자세히 (전체 기간 표)</summary>
+  $('milestones').innerHTML = `<h2 class="desktop-only">기간별 현금 인출(계산값) · 3년 매일 현금화 기준</h2><div class="ms-cards desktop-only">${cards}</div>
+    <details class="ms-more" id="ms-more" ${st.msOpen ? 'open' : ''}><summary>자세히 (18·24·36개월 포함 전체 기간 표)</summary>
     <div class="tbl-wrap"><table><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>
     <p class="hint">목표일은 시작일의 달력상 +3/+6/+12/+18/+24/+36개월(선택 기간 내, 또는 고정 일수)이고, 값은 목표일 전 마지막 정산의 마감 상태입니다.
     모두 같은 장부에서 읽으며, 준비금은 마지막 날에만 돌려받습니다. 누적 배출 DAI 가치는 현금이 아닙니다.</p>
     <label class="inline"><input type="checkbox" id="ms-detail" ${det ? 'checked' : ''}> 상세 열 보기</label></details>`;
   $('ms-detail').onchange = (e) => { st.showMsDetail = e.target.checked; renderMilestones(); };
   $('ms-more').ontoggle = (e) => { st.msOpen = e.target.open; };
-  bindRowJump($('milestones'));
+  bindRowJump($('milestones'), { baseline: true });
 }
-function bindRowJump(root) {
+function bindRowJump(root, opts = {}) {
   root.querySelectorAll('[data-day]').forEach((tr) => {
-    const go = () => jumpTo(Number(tr.dataset.day));
+    const go = () => jumpTo(Number(tr.dataset.day), opts);
     tr.onclick = go; tr.onkeydown = (e) => { if (e.key === 'Enter') go(); };
   });
 }
 
 function renderDaySamples() {
   const box = $('day-samples'); if (!box) return;
-  const rows = daySampleRows(st.out.result);
-  const first = st.out.result.daily.find((r) => r.emissionDai > 0n);
-  const firstQty = first ? cashAiEquivalent(first.emissionDai, st.out.result.daily[0]?.price ?? null) : null;
+  if (st.chartMode === 'strategy' && !currentStrategy()) { box.innerHTML = '<p class="hint">전략 재계산 대기 · 이전 수치 표시 안 함</p>'; return; }
+  const v = st.view ?? viewState(), res = v.result;
+  const rows = daySampleRows(res);
+  const first = res.daily.find((r) => r.emissionDai > 0n);
+  const firstQty = first ? cashAiEquivalent(first.emissionDai, res.daily[0]?.price ?? null) : null;
   const firstNote = firstQty === null ? '현재 조건에서 첫 보상 수량을 계산할 수 없습니다.'
     : `첫 보상 예상: ${fmtTok(firstQty)} · ${esc(first.date)} (${fmtDai(first.emissionDai)} ÷ 현재 계산 시세). 수수료 차감 전이며 실제 정산 가격·편입 시점에 따라 달라집니다.`;
 
-  box.innerHTML = `<h2>대표 정산일</h2>
+  box.innerHTML = `<h2>대표 정산일 <span class="hint">${esc(v.label)} 장부 · 그래프 범위와 같음</span></h2>
     <p class="hint">1일은 투자 시작일입니다. 현재 기본 모형은 POWER 편입에 1일이 걸린다고 가정하여 당일 배출을 0으로 표시합니다. 실제 편입·첫 정산 시점은 별도 확인이 필요합니다. 배출 DAI 가치도 현재 배출 조건을 유지한 가정값입니다.</p>
     <p class="hint">${firstNote} 미래 일자별 AiLGNS 수량은 가격에 따라 달라져 표시하지 않습니다.</p>
-    <div class="tbl-wrap"><table class="sample-table"><thead><tr><th>회차 · 날짜</th><th>배출 DAI 가치</th><th>하루 실제 현금</th><th>활성 · 대기 POWER</th></tr></thead><tbody>${rows.map((r) =>
+    <div class="tbl-wrap"><table class="sample-table"><thead><tr><th>회차 · 날짜</th><th>배출 DAI 가치</th><th>하루 현금 인출(계산값)</th><th>활성 · 대기 POWER</th></tr></thead><tbody>${rows.map((r) =>
       `<tr class="clickable" tabindex="0" data-day="${r.day - 1}"><td>${r.day}일 · ${esc(r.date)}</td><td>${fmtDai(r.emissionDai, 2)}</td><td>${fmtDai(r.dailyCashDai, 2)}</td><td>${fmtPower(r.activePower)} · ${fmtPower(r.pendingPower)}</td></tr>`).join('')}</tbody></table></div>`;
   bindRowJump(box);
 }
 
 // ---- 미실현(현금 ROI 제외) ----
 function renderUnrealized() {
-  const u = st.out.result.summary.unrealized;
+  if (st.chartMode === 'strategy' && !currentStrategy()) { $('unrealized').textContent = '전략 재계산 대기 · 이전 수치 표시 안 함'; return; }
+  const view = st.view ?? viewState(), u = view.full.summary.unrealized;
   const item = (t, v) => `<div><small>${t}</small><b class="num">${v}</b></div>`;
-  $('unrealized').innerHTML = `<h2>종료일 미실현 잔액 <span class="hint">현금 ROI에 포함하지 않음 · 강제 매도 없음 · Power에 현금 가치 부여 안 함</span></h2>
+  $('unrealized').innerHTML = `<h2>종료일 미실현 잔액 <span class="hint">${esc(view.label)} 장부 종료일 · 현금 ROI에 포함하지 않음 · 강제 매도 없음 · Power에 현금 가치 부여 안 함</span></h2>
   <div class="kpi-grid">${item('매도가능 AiLGNS', fmtTok(u.spendableAilgns))}${item('잠금 AiLGNS', fmtTok(u.lockedAilgns))}${item('대기 Power', fmtPower(u.pendingPower))}
   ${item('활성 Power', fmtPower(u.activePower))}${item('미처리 크레딧', fmtTok(u.credits))}${item('HELIX 소각 대기 LGNS', fmtTok(u.lgnsWaiting, 'LGNS', 9))}
   ${item('미반환 내부 DAI', fmtDai(u.cashNotReturned))}${item('가스 잔액 Anubis · Polygon', `${fmtDai(u.nativeGas.anubis)} · ${fmtDai(u.nativeGas.polygon)}`)}</div>`;
@@ -1343,18 +1506,34 @@ export function optGroupsHtml(res, out) {
 
 function renderCompare() {
   const box = $('compare-body'); if (!box) return;
-  const o = st.opt, a = st.inputValid ? o.applied : null;
+  const o = st.opt, a = currentStrategy();
   let result = '';
   if (a) {
-    const s = a.replay.full.summary, plan = a.plan, pb = s.paybackDay == null ? null : a.replay.full.daily[s.paybackDay];
-    const price = a.replay.full.daily[0]?.price ?? null, aiEq = cashAiEquivalent(s.W, price);
-    const aiBasis = st.out?.marketUse?.ailgns?.source === 'SPOT' ? '조회 spot 기준 환산'
-      : st.out?.marketUse?.ailgns?.source === 'SAVED_TWAP' ? '저장 TWAP 기준 환산' : '계산 기준 가격 환산';
-    result = `<div class="strategy-result" role="status"><p class="section-kicker">검색한 단일 전환 정책 중 현금 ROI 최대</p>
+    const plan = a.plan, S = a.strategy, Bl = a.baseline, y = horizonLabel(a.horizonYears);
+    const pbOf = (res) => { const d = res.summary.paybackDay; const r = d == null ? null : res.daily[d]; return r ? `${esc(r.date)} · ${r.day + 1}회차` : '기간 내 미회수'; };
+    const bv = (fn) => (a.baselineReady ? fn() : '계산 보류');
+    const row = (t, sv, bvv) => `<tr><th scope="row">${t}</th><td>${sv}</td><td>${bvv}</td></tr>`;
+    const notes = [];
+    if (!a.sameBudget) notes.push(`두 장부의 총투입이 달라(전략 ${fmtDai(S.summary.I, 0)} · 매일 현금화 ${fmtDai(Bl.summary.I, 0)}) 같은 예산 비교가 아닙니다. 차이를 성과로 읽지 마세요.`);
+    if (!a.baselineReady) notes.push(`같은 ${y} 매일 현금화 장부가 처리 보류 상태라 비교 값을 표시하지 않습니다.`);
+    result = `<div class="strategy-result" role="status"><p class="section-kicker">${esc(y)} · 검색한 단일 전환 정책 중 현금 ROI 최대 (전체 장부 재검산 일치)</p>
       <h3>${esc(plan.label)}</h3>
-      <p class="strategy-dates">${plan.lastReburnDate ? `마지막 실제 재소각 ${esc(plan.lastReburnDate)} (${plan.lastReburnDay}회차)` : '실제 재소각 없음'} · ${plan.firstCashDate ? `첫 실제 현금 ${esc(plan.firstCashDate)} (${plan.firstCashDay}회차)` : '기간 내 실제 현금 없음'}</p>
-      <div class="strategy-metrics"><span><small>누적 실제 현금</small><b>${fmtDai(s.W, 0)}</b></span><span><small>현금 ROI</small><b>${fmtBpsPct(s.roiBps)}</b></span><span><small>순이익</small><b>${fmtDai(s.net, 0)}</b></span><span><small>원금 회수</small><b>${pb ? `${esc(pb.date)} · ${pb.day + 1}회차` : '기간 내 미회수'}</b></span></div>
-      <p class="hint">${plan.switchDay === 0 ? '이 조건에서는 재소각 없이 처음부터 보상을 현금화하는 경로가 가장 높았습니다.' : '터빈 비용을 충당할 만큼만 먼저 매도하고, 남은 AiLGNS를 전환일까지 재소각하여 POWER로 활성화합니다. 전환일 이후 보상은 재소각하지 않고 현금으로 받습니다.'}</p></div>`;
+      <p class="strategy-dates">${plan.lastReburnDate ? `마지막 재소각(계산값) ${esc(plan.lastReburnDate)} (${plan.lastReburnDay}회차)` : '재소각 없음(계산값)'} · ${plan.firstCashDate ? `첫 현금 인출(계산값) ${esc(plan.firstCashDate)} (${plan.firstCashDay}회차)` : '기간 내 현금 인출 없음(계산값)'}</p>
+      <div class="tbl-wrap"><table class="strategy-compare"><thead><tr><th>${esc(y)} · ${a.sameBudget ? '같은 예산' : '예산 다름'}</th><th>전환 전략</th><th>매일 현금화</th></tr></thead><tbody>
+        ${row('총투입', fmtDai(S.summary.I, 0), fmtDai(Bl.summary.I, 0))}
+        ${row('현금 인출 합계(계산값)', fmtDai(S.summary.W, 0), bv(() => fmtDai(Bl.summary.W, 0)))}
+        ${row('현금 순손익', fmtDai(S.summary.net, 0), bv(() => fmtDai(Bl.summary.net, 0)))}
+        ${row('현금 ROI', fmtBpsPct(S.summary.roiBps), bv(() => fmtBpsPct(Bl.summary.roiBps)))}
+        ${row('총투입 회수', pbOf(S), bv(() => pbOf(Bl)))}
+      </tbody></table></div>
+      <p class="hint">선택 기간 종료 준비금 반환 포함: 전환 전략 ${fmtDai(S.summary.endReturnDai ?? 0n, 2)}, 매일 현금화 ${fmtDai(Bl.summary.endReturnDai ?? 0n, 2)}. 상단 기준표는 3년간 계속 운용하므로 중간 기간에 준비금을 반환하지 않아 금액이 다를 수 있습니다.</p>
+      ${a.sameBudget && a.baselineReady ? `<p class="strategy-delta">매일 현금화 대비 현금 ${fmtDai(S.summary.W - Bl.summary.W, 2)} · ROI ${fmtN(((S.summary.roiBps ?? 0) - (Bl.summary.roiBps ?? 0)) / 100, 2)}%p</p>` : ''}
+      ${notes.map((n) => `<p class="warn">${esc(n)}</p>`).join('')}
+      <p class="hint">두 장부 모두 ${esc(y)}에서 끝나며 연장 추정하지 않습니다. ${a.sameBudget ? '원금·운전자금·가스·비교 예산은 위 3년 매일 현금화 기준과 같은 값을 공유합니다(운전자금은 3년 매일 현금화 기준으로 산정, 그 안에서 끝나는 전략만 후보).' : '두 장부의 총투입이 달라 같은 예산의 수익 비교로 해석할 수 없습니다.'} 위 기준 요약은 이 결과로 바뀌지 않습니다.</p>
+      <p class="hint">${plan.switchDay === 0 ? '이 조건에서는 재소각 없이 처음부터 보상을 현금화하는 경로가 가장 높았습니다.' : '터빈 비용을 충당할 만큼만 먼저 매도하고, 남은 AiLGNS를 전환일까지 재소각하여 POWER로 활성화한다고 계산합니다. 전환일 이후 보상은 재소각하지 않고 현금 인출로 계산합니다.'}</p>
+      <div class="actions"><button type="button" data-chart-strategy>${st.chartMode === 'strategy' ? '그래프에 표시 중' : '그래프에서 전략 장부 보기'}</button></div></div>`;
+  } else if (o.applied) {
+    result = '<div class="block-msg" role="status">입력·비교 기간·조회값이 바뀌어 이전 전략 결과를 숨겼습니다. 다시 계산하세요.</div>';
   } else if (o.result) {
     result = optimizerFailureHtml(o.result);
   }
@@ -1364,12 +1543,14 @@ function renderCompare() {
     <p class="hint" id="opt-status" aria-live="polite">${esc(o.status)}</p>${result}
     <p class="hint">미래 가격·배출률·수수료가 현재 조건으로 유지된다는 조건부 계산입니다. 첫 터빈 비용에는 준비 DAI가 먼저 필요합니다.</p>`;
   $('btn-opt').onclick = runOptimizer;
+  const sv = box.querySelector('[data-chart-strategy]');
+  if (sv) sv.onclick = () => { st.chartMode = 'strategy'; renderViewAreas(); renderCompare(); $('charts').scrollIntoView({ block: 'nearest' }); };
   const cb = document.getElementById('btn-opt-cancel');
   if (cb) cb.onclick = () => { cancelOptimizer('취소했습니다 — 이전 탐색 결과는 버림'); renderCompare(); };
 }
 
 function optimizerFailureHtml(res) {
-  const g = res?.results?.find((x) => x.horizonYears === Number(st.out?.scenario?.horizonYears)) ?? res?.results?.[0];
+  const g = res?.results?.find((x) => x.horizonYears === (st.opt.request?.horizons?.[0] ?? optimizerHorizon(readForm()))) ?? res?.results?.[0];
   if (g?.winners?.maxRoi?.winner) return '<div class="block-msg">전체 장부 재검산이 일치하지 않아 추천을 적용하지 않았습니다.</div>';
   const by = g?.conditional?.byReason ?? {};
   let why = res?.gate && !res.gate.ok ? '현재 조회 데이터가 미확정이어서 정상 후보로 검증하지 못했습니다.'
@@ -1390,16 +1571,6 @@ export function candidateToFields(target) {
     f.usage = pct === 0 ? 'sell' : 'partial'; f.policyType = 'ratio'; f.recyclePct = String(pct);
   }
   return f;
-}
-function applyCandidate(target) {
-  for (const [k, v] of Object.entries(candidateToFields(target))) setField(k, v);
-  const keep = st.opt.result;
-  recompute();
-  st.opt.result = keep;
-  if (st.out?.result && target.expectNet !== undefined) {
-    st.opt.status = String(st.out.result.summary.net) === String(target.expectNet) ? '선택한 전략을 계산기에 적용했습니다.' : '적용했지만 비교 때와 금액이 다릅니다 — 가정과 경고를 확인하세요.';
-  }
-  renderCompare();
 }
 
 /**
@@ -1428,9 +1599,12 @@ export function makeWorkerHandle({ WorkerCtor = globalThis.Worker, urlApi = glob
   return h;
 }
 
-/** worker 요청 본문(contract §2). scenario는 정규화 결과 + 고정 비교예산. */
-export function optimizeRequest(out, snapshot) {
-  const scenario = { ...withBudget(out.scenario, out.budget), funding: FUNDING.SELF };
+/**
+ * worker 요청 본문(contract §2). scenario는 정규화 결과 + 고정 비교예산. horizonYears를 주면 그 기간만 탐색한다
+ * (기준 장부 out은 바꾸지 않음 — 복사본의 기간만 바꾼다).
+ */
+export function optimizeRequest(out, snapshot, horizonYears = Number(out.scenario.horizonYears)) {
+  const scenario = { ...withBudget(out.scenario, out.budget), funding: FUNDING.SELF, horizonYears: Number(horizonYears) };
   return { scenario, snapshot, horizons: [Number(scenario.horizonYears)], fundings: [FUNDING.SELF], search: { mode: 'switch-only' } };
 }
 
@@ -1450,24 +1624,23 @@ function onOptResult(res) {
   const o = st.opt;
   if (!st.inputValid) return;
   o.running = false; o.result = res; o.hasRun = true; o.applied = null;
-  const year = Number(st.out?.scenario?.horizonYears), g = res?.results?.find((x) => x.horizonYears === year) ?? res?.results?.[0];
-  const metric = g?.winners?.maxRoi, winner = metric?.winner, replay = metric?.replayKey ? g.replays?.[metric.replayKey] : null;
-  const exact = replay?.verified === true && winner && ['I', 'W', 'net', 'paybackDay'].every((k) => replay.full.summary[k] === winner[k]);
-  if (!exact) {
-    o.status = winner ? '전체 장부 재검산이 일치하지 않아 추천을 적용하지 않았습니다.' : '완료 가능한 단일 전환 정책을 찾지 못했습니다.';
-    renderCompare(); return;
+  // 결과는 폼·기준 장부(st.out)에 쓰지 않고 st.opt.applied에만 저장한다.
+  const req = o.request, cur = currentStrategyRequest();
+  if (!req || !cur || req.snapshot !== cur.snapshot || strategyRequestKey(req) !== strategyRequestKey(cur)) {
+    o.status = '탐색 중 입력·기간·조회값이 바뀌어 결과를 버렸습니다. 다시 계산하세요.';
+    syncChartControls(); renderCompare(); return;
   }
-  const plan = switchPlanView(replay.full, winner.policy);
-  for (const [k, v] of Object.entries(candidateToFields({ policy: winner.policy, horizonYears: g.horizonYears, funding: FUNDING.SELF }))) setField(k, v);
-  o.applied = { plan, winner, replay };
-  const valid = recompute({ preserveOptimizer: true });
-  const applied = st.out?.result?.summary;
-  const same = valid && st.inputValid && applied && ['I', 'W', 'net', 'paybackDay'].every((k) => applied[k] === winner[k]);
-  if (!same) {
-    o.applied = null; resetBaselinePolicy(); recompute({ preserveOptimizer: true });
-    o.status = valid ? '적용 후 전체 장부 금액이 달라 추천을 적용하지 않았습니다.' : '입력값 또는 시세 상태가 바뀌어 추천을 적용하지 않았습니다.';
-  } else o.status = `${g.horizonYears === 0.5 ? '6개월' : `${g.horizonYears}년`} 전체 ${g.candidatesEvaluated}개 전환일을 검산하고 자동 적용했습니다.`;
-  renderCompare();
+  let cmp;
+  try { cmp = buildStrategyComparison(req, res); } catch (e) { cmp = { status: 'ERROR', error: e.message }; }
+  if (cmp.status !== 'OK') {
+    o.status = cmp.status === 'REPLAY_MISMATCH' ? '전체 장부 재검산이 일치하지 않아 전략 결과를 표시하지 않았습니다.'
+      : cmp.status === 'NO_WINNER' ? '완료 가능한 단일 전환 정책을 찾지 못했습니다.' : `비교 계산 실패: ${cmp.error}`;
+    syncChartControls(); renderCompare(); return;
+  }
+  o.applied = cmp;
+  if (st.chartMode === 'strategy') renderViewAreas();
+  o.status = `${horizonLabel(cmp.horizonYears)} 전체 ${cmp.candidatesEvaluated}개 전환일을 검산했습니다. 위 기준 요약(3년 매일 현금화)은 바뀌지 않습니다.`;
+  syncChartControls(); renderCompare();
 }
 function onOptError(msg) { st.opt.running = false; st.opt.status = `탐색 실패: ${msg}`; renderCompare(); }
 
@@ -1477,7 +1650,7 @@ function runMainThread(req) {
   st.opt.client = { cancel() { signal.aborted = true; } };
   st.opt.status = 'Worker 사용 불가 — 메인 스레드에서 탐색(화면이 느려질 수 있음)';
   renderCompare();
-  optimize({ scenario: req.scenario, snapshot: st.snapshot, years: req.horizons, fundings: req.fundings }, { signal, search: req.search, onProgress: (p) => { if (job === st.opt.mainJob) onOptProgress(p); } })
+  optimize({ scenario: req.scenario, snapshot: req.snapshot, years: req.horizons, fundings: req.fundings }, { signal, search: req.search, onProgress: (p) => { if (job === st.opt.mainJob) onOptProgress(p); } })
     .then((res) => { if (job === st.opt.mainJob && !res.cancelled) onOptResult(res); })
     .catch((e) => { if (job === st.opt.mainJob) onOptError(e.message); });
 }
@@ -1488,7 +1661,8 @@ function runOptimizer() {
   if (reserveModeOf(readForm()) === 'AUTO' && st.reserveAdvice.status === 'loading') { st.opt.status = '운전자금 자동 산정이 끝난 뒤 계산하세요.'; renderCompare(); return; }
   st.opt.applied = null;
   if (!recompute({ preserveOptimizer: true })) { st.opt.status = '입력 오류를 먼저 해결하세요.'; renderCompare(); return; }
-  const req = optimizeRequest(st.out, st.snapshot);
+  const req = currentStrategyRequest();
+  st.opt.request = req;
   if (!makeWorkerAvailable()) { runMainThread(req); return; }
   let fellBack = false;
   const client = createOptimizerClient({
@@ -1523,15 +1697,16 @@ function renderMore() {
   if ($('d-ledger').open) renderLedger();
 }
 function renderLedger(followPin = false) {
-  const d = st.out.result.daily, pages = Math.max(1, Math.ceil(d.length / PAGE));
+  if (st.chartMode === 'strategy' && !currentStrategy()) { $('ledger').textContent = '전략 재계산 대기 · 이전 수치 표시 안 함'; return; }
+  const v = st.view ?? viewState(), d = v.result.daily, pages = Math.max(1, Math.ceil(d.length / PAGE));
   if (followPin && st.pinned !== null) st.ledgerPage = Math.floor(st.pinned / PAGE);
   const p = Math.min(st.ledgerPage, pages - 1), rows = d.slice(p * PAGE, (p + 1) * PAGE);
   const start = st.out.scenario.startDate;
   const cols = [['정산일', (r) => esc(r.date)], ['회차', (r) => r.day + 1], ['시작 후 일', (r) => recordTiming(r, start).elapsed ?? ''], ['활성 Power', (r) => fmtN(toNum(r.activePowerEnd), 0)], ['대기 Power', (r) => fmtN(toNum(r.pendingPower), 0)],
     ['정산 DAI', (r) => fmtN(toNum(r.emissionDai), 2)], ['터빈 매수', (r) => fmtN(toNum(r.turbineBuyDai), 2)], ['충당 매도 DAI', (r) => fmtN(toNum(r.coverSaleDai + r.reserveSaleDai), 2)],
     ['재소각 AiLGNS', (r) => fmtN(toNum(r.burnTokens), 4)], ['외부 투입', (r) => fmtN(toNum(r.externalTopup), 2)], ['외부 인출', (r) => fmtN(toNum(r.externalWithdrawal), 2)],
-    ['누적 회수', (r) => fmtN(toNum(r.cumWithdrawal), 2)], ['순손익', (r) => fmtN(toNum(r.net), 2)], ['내부 DAI', (r) => fmtN(toNum(r.cash), 2)]];
-  $('ledger').innerHTML = `<div class="ledger-nav"><button type="button" data-pg="-1" ${p === 0 ? 'disabled' : ''}>이전</button><span>${p + 1} / ${pages} 쪽 (${d.length}일)</span>
+    ['누적 인출(계산값)', (r) => fmtN(toNum(r.cumWithdrawal), 2)], ['순손익', (r) => fmtN(toNum(r.net), 2)], ['내부 DAI', (r) => fmtN(toNum(r.cash), 2)]];
+  $('ledger').innerHTML = `<div class="ledger-nav"><button type="button" data-pg="-1" ${p === 0 ? 'disabled' : ''}>이전</button><span>${esc(v.label)} · ${p + 1} / ${pages} 쪽 (${d.length}일)</span>
     <button type="button" data-pg="1" ${p >= pages - 1 ? 'disabled' : ''}>다음</button><span class="hint">행을 누르면 그래프 날짜 고정 · 전체 열은 CSV</span></div>
     <div class="tbl-wrap"><table><thead><tr>${cols.map((c) => `<th>${c[0]}</th>`).join('')}</tr></thead><tbody>${rows.map((r) =>
       `<tr class="clickable${r.day === st.pinned ? ' selected' : ''}" tabindex="0" data-day="${r.day}">${cols.map((c) => `<td>${c[1](r)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
@@ -1552,14 +1727,16 @@ async function sha256Hex(text) {
 }
 async function exportJson() {
   if (!st.inputValid || !st.out?.result) return;
-  const payload = buildExport({ ...st.out, snapshot: st.snapshot, changelog: st.changelog, market: st.market });
+  const payload = buildExport({ ...st.out, snapshot: st.snapshot, changelog: st.changelog, market: st.market, strategy: currentStrategy() });
   const body = JSON.stringify(payload, jsonReplacer);
   payload.sha256 = await sha256Hex(body); payload.sha256Note = 'sha256 필드를 뺀 본문 JSON의 해시';
   download(`helix-sim-${st.out.scenario.startDate}-${st.out.scenario.horizonYears}y.json`, JSON.stringify(payload, jsonReplacer, 2), 'application/json');
 }
+/** CSV는 그래프에서 고른 장부(기준 3년 또는 전환 전략) 전체. 범위 자르기 없이 그 장부 끝까지. */
 function exportCsv() {
-  if (!st.inputValid || !st.out?.result) return;
-  download(`helix-sim-ledger-${st.out.scenario.startDate}-${st.out.scenario.horizonYears}y.csv`, ledgerToCsv(st.out.result.daily), 'text/csv;charset=utf-8');
+  if (!st.inputValid || !st.out?.result || (st.chartMode === 'strategy' && !currentStrategy())) return;
+  const v = viewState();
+  download(`helix-sim-ledger-${st.out.scenario.startDate}-${v.mode}-${v.horizonYears}y.csv`, ledgerToCsv(v.full.daily), 'text/csv;charset=utf-8');
 }
 
 // ---- 운전자금: 최소 필요액 탐색(총 비교예산 안) · 예시값 ----
@@ -1584,7 +1761,7 @@ function doMinReserve() {
       if (!cashResultReady(out)) {
         const p = autoReservePlan(out, st.snapshot);
         if (p.status === 'OK') {
-          box.innerHTML = `운전자금 추정 ${fmtDai(p.reserveDai)} · 현재보다 별도 추가 ${fmtDai(p.additionalReserve)} · 적용 후 총투입 ${fmtDai(p.projectedTotal)}. 현재 ${esc(policyReadable(out.policy))} 경로·선택 기간 전체 재실행 완료, 외부 추가 입금 0. 모든 전략의 최소값이나 실제 필요액 보장은 아닙니다. <button type="button" id="btn-apply-reserve">이 값 적용</button>`;
+          box.innerHTML = `운전자금 추정 ${fmtDai(p.reserveDai)} · 현재보다 별도 추가 ${fmtDai(p.additionalReserve)} · 적용 후 총투입 ${fmtDai(p.projectedTotal)}. 현재 ${esc(policyReadable(out.policy))} 경로·3년 전체 재실행 완료, 외부 추가 입금 0. 모든 전략의 최소값이나 실제 필요액 보장은 아닙니다. <button type="button" id="btn-apply-reserve">이 값 적용</button>`;
           const btn = document.getElementById('btn-apply-reserve');
           btn.onclick = () => { if (!st.inputValid || st.out !== out) return; setField('reserveMode', 'MANUAL'); st.reserveAuto.dirty = false; setField('reserveDai', formatUnits(p.reserveDai, 18)); recompute(); };
         } else box.textContent = '현재 정책과 선택 기간에서는 운전자금 추정값을 만들지 못했습니다. 경로 상태나 다른 전략을 확인하세요.';
@@ -1639,7 +1816,7 @@ export async function init() {
   });
   // 원화 금액·LGNS 수량 쉼표: 입력·붙여넣기·통화 전환 때 서식, 한글 조합 중에는 건드리지 않음. 통화 전환 시 금액 환산은 하지 않는다.
   const amountEl = $('inputs').elements.amount;
-  const usesGrouping = () => ['KRW', 'LGNS'].includes(readForm().asset);
+  const usesGrouping = () => ['DAI', 'KRW', 'LGNS'].includes(readForm().asset);
   const fmtAmount = () => {
     const caret = amountEl.selectionStart ?? amountEl.value.length;
     const r = reformatWithCaret(amountEl.value, caret, usesGrouping());
@@ -1659,21 +1836,27 @@ export async function init() {
     if (target?.name === 'reserveMode') { st.reserveAuto.dirty = target.value === 'AUTO'; return; }
     if (reserveModeOf(readForm()) === 'AUTO') st.reserveAuto.dirty = true;
   };
-  $('inputs').addEventListener('input', (e) => {
+  document.addEventListener('input', (e) => {
+    if (e.target.form !== $('inputs') || e.target.name === 'horizonYears') return;
     prepareReserveEdit(e.target);
     st.inputValid = false; st.opt.applied = null; resetBaselinePolicy(); invalidateReserveAdvice();
     cancelOptimizer('입력 변경으로 이전 추천을 지웠습니다.');
-    document.querySelectorAll('.results > .card:not(.results-summary):not(.strategy)').forEach((c) => c.classList.add('stale-result'));
+    document.querySelectorAll('.results > .chart-card, .results > .disclosure, .results > .more').forEach((c) => c.classList.add('stale-result'));
     $('quick-summary').innerHTML = '<p class="qs-pending">입력 반영 중 · 이전 추천을 지웠습니다.</p>';
     renderCompare(); clearTimeout(t); t = setTimeout(recompute, 300);
   });
-  $('inputs').addEventListener('change', (e) => { prepareReserveEdit(e.target); clearTimeout(t); recompute(); });
+  document.addEventListener('change', (e) => { if (e.target.form !== $('inputs') || e.target.name === 'horizonYears') return; prepareReserveEdit(e.target); clearTimeout(t); recompute(); });
+  // 비교 기간은 전략 탐색에만 쓴다. 기준 장부(3년 매일 현금화)와 AUTO 운전자금은 다시 계산하지 않는다.
   document.querySelectorAll('[name="horizonYears"][form="inputs"]').forEach((r) => r.addEventListener('change', () => {
     const rerun = st.opt.hasRun;
-    if (reserveModeOf(readForm()) === 'AUTO') st.reserveAuto.dirty = true;
-    clearTimeout(t); const valid = recompute();
-    if (rerun && valid) st.opt.rerunTimer = setTimeout(runOptimizer, 250);
+    clearTimeout(st.opt.rerunTimer);
+    cancelOptimizer('비교 기간 변경으로 이전 전략 결과를 지웠습니다.'); st.opt.applied = null;
+    if (st.chartMode === 'strategy') renderViewAreas(); else syncChartControls();
+    renderCompare();
+    if (rerun && st.inputValid) st.opt.rerunTimer = setTimeout(runOptimizer, 250);
   }));
+  $('chart-mode')?.addEventListener('change', (e) => { st.chartMode = e.target.value === 'strategy' ? 'strategy' : 'baseline'; renderViewAreas(); renderCompare(); });
+  $('chart-range')?.addEventListener('change', (e) => { st.chartRange = Number(e.target.value) === 2 ? 2 : 3; renderViewAreas(); });
   $('inputs').addEventListener('submit', (e) => e.preventDefault());
   $('btn-live').onclick = doLive;
   $('btn-apply').onclick = applyPending;

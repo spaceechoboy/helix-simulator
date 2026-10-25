@@ -78,12 +78,23 @@ const markerLanes = (markers, width, n, pad) => {
 /**
  * @param root 컨테이너 요소
  * @param model {n, dates[], markers:[{day,label,kind?:'payback'}], charts:[{id,title,unit,fmt,rightAxis?:{fmt,label},series:[{key,label,cls,type:'step'|'bar',axis?:'right',values:(number|null)[]}]}]}
- * @param hooks {onCursor(i), onPin(i|null)}
+ * @param hooks {onCursor(i), onPin(i|null), initialPinnedDate?:string} — date restores pin silently across refresh
  * @returns {setCursor(i), pin(i), destroy()}
  */
 export function createSyncedCharts(root, model, hooks = {}) {
   root.innerHTML = '';
-  const state = { i: Math.max(0, model.n - 1), pinned: null };
+  const initialPin = hooks.initialPinnedDate == null ? -1 : (model.dates ?? []).indexOf(hooks.initialPinnedDate);
+  const state = { i: initialPin >= 0 ? initialPin : Math.max(0, model.n - 1), pinned: initialPin >= 0 ? initialPin : null };
+  let announceTimer = null;
+  const announce = () => {
+    clearTimeout(announceTimer);
+    const pending = views.map(v => ({ v, text: v.tooltip.textContent }));
+    announceTimer = setTimeout(() => {
+      for (const { v, text } of pending) {
+        if (v.announcement.textContent !== text) v.announcement.textContent = text;
+      }
+    }, 300);
+  };
   const views = [];
   let ro = null;
 
@@ -108,7 +119,7 @@ export function createSyncedCharts(root, model, hooks = {}) {
       };
       const lanes = markerLanes(markers, width, n, basePad);
       const staggered = [...lanes.values()].some((lane) => lane > 0);
-      const height = (width < 600 ? 300 : 380) + (staggered ? MARKER_LANE_STEP : 0);
+      const height = (width < 600 ? 300 : 420) + (staggered ? MARKER_LANE_STEP : 0);
       const pad = { ...basePad, b: PAD.b + (staggered ? MARKER_LANE_STEP : 0) };
       const fig = document.createElement('figure');
       fig.className = 'chart';
@@ -116,14 +127,22 @@ export function createSyncedCharts(root, model, hooks = {}) {
       cap.innerHTML = `<span class="chart-title">${c.title}</span><span class="legend">${c.series.map((s) => `<span class="key ${s.cls}">${s.label}</span>`).join('')}</span>`;
       fig.appendChild(cap);
       const svg = el('svg', { viewBox: `0 0 ${width} ${height}`, width: '100%', height, tabindex: '0', role: 'img',
-        'aria-label': `${c.title}. 좌우 화살표로 날짜 이동, Enter로 상세 고정, Esc로 해제.` });
+        'aria-label': `${c.title}. 좌우 화살표로 하루, PageUp·PageDown으로 30일, Home·End로 처음과 끝 이동, Enter로 고정, Esc로 해제.` });
+      svg.style.touchAction = 'pan-y';
       fig.appendChild(svg);
       const tooltip = document.createElement('div');
       tooltip.className = 'chart-tooltip'; tooltip.hidden = true;
-      tooltip.setAttribute('role', 'status'); fig.appendChild(tooltip);
+      tooltip.setAttribute('aria-hidden', 'true'); fig.appendChild(tooltip);
+      const announcement = document.createElement('div');
+      announcement.className = 'chart-announcement';
+      announcement.setAttribute('aria-live', 'polite');
+      announcement.setAttribute('aria-atomic', 'true');
+      Object.assign(announcement.style, { position: 'absolute', width: '1px', height: '1px', padding: '0', overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap' });
+      fig.appendChild(announcement);
       root.appendChild(fig);
 
-      const leftAxis = axisScale(leftSeries.flatMap((s) => s.values), height, pad);
+      const referenceValue = Number.isFinite(c.referenceValue) ? c.referenceValue : null;
+      const leftAxis = axisScale([...leftSeries.flatMap((s) => s.values), ...(referenceValue === null ? [] : [referenceValue])], height, pad);
       const rightAxis = hasRight ? axisScale(rightSeries.flatMap((s) => s.values), height, pad) : null;
       const leftFmt = typeof c.fmt === 'function' ? c.fmt : String;
       const rightFmt = typeof c.rightAxis?.fmt === 'function' ? c.rightAxis.fmt : leftFmt;
@@ -171,6 +190,12 @@ export function createSyncedCharts(root, model, hooks = {}) {
           ...(payback ? { style: 'font-weight:700;paint-order:stroke;stroke:#fff;stroke-width:3px' } : {}) }, svg);
         t.textContent = m.label;
       });
+      if (referenceValue !== null) {
+        const py = leftAxis.y(referenceValue);
+        el('line', { x1: pad.l, x2: width - pad.r, y1: py, y2: py, class: 'reference-line', stroke: '#53634c', 'stroke-dasharray': '2 5' }, svg);
+        const label = el('text', { x: width - pad.r - 4, y: Math.max(pad.t + 12, py - 6), class: 'tick reference-label', 'text-anchor': 'end' }, svg);
+        label.textContent = `${c.referenceLabel ?? '총투입'} ${leftFmt(referenceValue)} ${c.unit ?? ''}`;
+      }
       const bw = Math.max(1, iw / Math.max(n, 1) * 0.8);
       for (const s of c.series) {
         const scale = s.axis === 'right' && rightAxis ? rightAxis : leftAxis;
@@ -196,31 +221,55 @@ export function createSyncedCharts(root, model, hooks = {}) {
       const dots = c.series.map((s) => el('circle', { r: 3.5, class: `dot ${s.cls}` }, svg));
       const hit = el('rect', { x: pad.l, y: pad.t, width: iw, height: ih, class: 'hit' }, svg);
       const scales = c.series.map((s) => s.axis === 'right' && rightAxis ? rightAxis : leftAxis);
-      views.push({ c, svg, cursor, dots, x, scales, width, tooltip });
+      views.push({ c, svg, cursor, dots, x, scales, width, tooltip, announcement });
 
       const fromEvent = (ev) => {
         const r = svg.getBoundingClientRect();
         const renderedWidth = r.width || width;
         return indexAt(((ev.clientX - r.left) / renderedWidth) * width, width, n, pad);
       };
-      hit.addEventListener('pointermove', (ev) => { if (ev.pointerType === 'mouse' && state.pinned === null) { tooltip.hidden = false; setCursor(fromEvent(ev), true); } });
-      hit.addEventListener('pointerleave', () => { if (state.pinned === null) tooltip.hidden = true; });
-      hit.addEventListener('pointerdown', (ev) => { tooltip.hidden = false; const i = fromEvent(ev); setCursor(i, true); pin(i); });
+      let gesture = null;
+      const eventTime = (ev) => Number.isFinite(ev.timeStamp) ? ev.timeStamp : Date.now();
+      const moveGesture = (ev) => {
+        if (gesture && ev.pointerId === gesture.id && Math.hypot(ev.clientX - gesture.x, ev.clientY - gesture.y) >= 8) gesture.moved = true;
+      };
+      hit.addEventListener('pointermove', (ev) => {
+        moveGesture(ev);
+        if (ev.pointerType === 'mouse' && state.pinned === null) { tooltip.hidden = false; setCursor(fromEvent(ev), true); }
+      });
+      hit.addEventListener('pointerleave', () => { gesture = null; if (state.pinned === null) tooltip.hidden = true; });
+      hit.addEventListener('pointerdown', (ev) => {
+        if (ev.button != null && ev.button !== 0) return;
+        gesture = { x: ev.clientX, y: ev.clientY, id: ev.pointerId, at: eventTime(ev), moved: false };
+      });
+      hit.addEventListener('pointercancel', () => { gesture = null; });
+      hit.addEventListener('pointerup', (ev) => {
+        moveGesture(ev);
+        const tap = gesture; gesture = null;
+        if (!tap || tap.id !== ev.pointerId || tap.moved || eventTime(ev) - tap.at > 500) return;
+        const i = fromEvent(ev);
+        if (state.pinned === i) pin(null, true);
+        else { setCursor(i, true); pin(i, true); }
+      });
+      svg.addEventListener('focus', () => { tooltip.hidden = false; draw(); });
+      svg.addEventListener('blur', () => { if (state.pinned === null) tooltip.hidden = true; });
       svg.addEventListener('keydown', (ev) => {
         const step = { ArrowLeft: -1, ArrowRight: 1, PageUp: -30, PageDown: 30 }[ev.key];
         let i = state.i;
-        if (step !== undefined) i += ev.shiftKey ? step * 7 : step;
+        if (step !== undefined) i += ev.shiftKey && ev.key.startsWith('Arrow') ? Math.sign(step) * 30 : step;
         else if (ev.key === 'Home') i = 0;
         else if (ev.key === 'End') i = n - 1;
-        else if (ev.key === 'Enter' || ev.key === ' ') { pin(state.i); ev.preventDefault(); return; }
-        else if (ev.key === 'Escape') { pin(null); return; }
+        else if (ev.key === 'Enter' || ev.key === ' ') { pin(state.pinned === state.i ? null : state.i, true); ev.preventDefault(); return; }
+        else if (ev.key === 'Escape') { pin(null, true); ev.preventDefault(); return; }
         else return;
         ev.preventDefault();
         tooltip.hidden = false;
         setCursor(Math.max(0, Math.min(n - 1, i)), true);
         if (state.pinned !== null) pin(state.i);
+        announce();
       });
     }
+    if (state.pinned !== null) for (const v of views) v.tooltip.hidden = false;
     draw();
   };
 
@@ -228,7 +277,7 @@ export function createSyncedCharts(root, model, hooks = {}) {
     for (const v of views) {
       const px = v.x(state.i);
       const number = (n) => Number.isFinite(n) ? n.toLocaleString('ko-KR', { maximumFractionDigits: 2 }) : '—';
-      v.tooltip.textContent = `${model.dates?.[state.i] ?? `${state.i + 1}일`}\n` + v.c.series.map(s => `${s.label}  ${number(s.values[state.i])} ${s.axis === 'right' ? 'POWER' : 'DAI'}`).join('\n') + (model.dailyDai ? `\n하루 보상 가치  ${number(model.dailyDai[state.i])} DAI` : '') + (state.pinned !== null ? '\n고정됨 · Esc로 해제' : '');
+      v.tooltip.textContent = `${model.dates?.[state.i] ?? `${state.i + 1}일`}\n` + v.c.series.map(s => `${s.label}  ${number(s.values[state.i])} ${s.axis === 'right' ? (v.c.rightAxis?.label ?? 'POWER') : (v.c.unit ?? '')}`).join('\n') + (model.dailyDai ? `\n하루 보상 가치  ${number(model.dailyDai[state.i])} DAI` : '') + (state.pinned !== null ? '\n고정됨 · Esc로 해제' : '');
       v.tooltip.style.left = `${Math.max(0, Math.min(v.width - Math.min(280, v.width), px - 130))}px`;
       v.cursor.setAttribute('x1', px); v.cursor.setAttribute('x2', px);
       v.cursor.classList.toggle('pinned', state.pinned !== null);
@@ -245,9 +294,14 @@ export function createSyncedCharts(root, model, hooks = {}) {
   function setCursor(i, force = false) {
     if (!force && state.pinned !== null) return;
     if (i === state.i && !force) return;
-    state.i = i; draw(); hooks.onCursor?.(i);
+    state.i = Math.max(0, Math.min(Math.max(0, model.n - 1), Number.isFinite(i) ? Math.round(i) : 0)); draw(); hooks.onCursor?.(state.i);
   }
-  function pin(i) { for (const v of views) v.tooltip.hidden = i === null; state.pinned = i; if (i !== null) state.i = i; draw(); hooks.onPin?.(i); }
+  function pin(i, shouldAnnounce = false) {
+    if (i !== null) i = Math.max(0, Math.min(Math.max(0, model.n - 1), Number.isFinite(i) ? Math.round(i) : 0));
+    for (const v of views) v.tooltip.hidden = i === null;
+    state.pinned = i; if (i !== null) state.i = i; draw(); hooks.onPin?.(i);
+    if (shouldAnnounce) announce();
+  }
 
   build();
   if (typeof ResizeObserver !== 'undefined') {
@@ -256,5 +310,5 @@ export function createSyncedCharts(root, model, hooks = {}) {
     ro.observe(root);
   }
   hooks.onCursor?.(state.i);
-  return { setCursor: (i) => setCursor(i, true), pin, destroy: () => ro?.disconnect(), get index() { return state.i; } };
+  return { setCursor: (i) => setCursor(i, true), pin, destroy: () => { ro?.disconnect(); clearTimeout(announceTimer); }, get index() { return state.i; } };
 }

@@ -8,10 +8,12 @@ import { formToRaw, formToPolicy, compute, chartModel, ledgerToCsv, mergeLive, d
   withBudget, recordTiming, EXAMPLE_VALUES, minReserveText, optimizeRequest, flattenOptimizeResult, candidateToFields, makeWorkerHandle, OPTIMIZER_PROTOCOL, resultStatus, resultStatusText,
   applySimpleForm, reserveSummary, singleChartModel, milestoneCards, applyMarket, quickSummaryRows, quickSummaryBasis, krwRate,
   groupDigits, stripGrouping, reformatWithCaret, explainBlocking, blockingText, noWinnerMessage, optGroupsHtml, policyReadable,
-  conversionSummary, daySampleRows, switchPlanView, cashAiEquivalent, cashResultReady, cashPresentation, autoReservePlan, reserveModeOf } from '../src/ui.js';
+  conversionSummary, daySampleRows, switchPlanView, cashAiEquivalent, cashResultReady, cashPresentation, autoReservePlan, reserveModeOf,
+  computeBaseline, baselineForm, optimizerHorizon, BASELINE_YEARS, BASELINE_POLICY, buildStrategyComparison, strategyIsCurrent,
+  chartWindow, resolvePinnedIndex, inputPowerView } from '../src/ui.js';
 import { formatUnits } from '../src/decimal.js';
 import { snapshotFromEvidence } from '../src/data.js';
-import { daysBetween } from '../src/dates.js';
+import { daysBetween, horizonDays } from '../src/dates.js';
 import { optimize, createOptimizerClient } from '../src/strategies.js';
 import { indexAt, niceTicks } from '../src/charts.js';
 import { bundle } from '../build.mjs';
@@ -770,8 +772,124 @@ test('메인 그래프 탭 1개·3/6/12 카드: 같은 장부, 커서 모델 유
   }
   assert.equal(singleChartModel(full, 9).charts[0], full.charts[2]);
   const cards = milestoneCards(out.result);
-  assert.deepEqual(cards.map((c) => c.label), ['3개월', '6개월', '1년', '1년 6개월', '2년']);
+  assert.deepEqual(cards.map((c) => c.label), ['3개월', '6개월', '1년']);              // 18·24개월은 자세히 표에만
   cards.forEach((c, i) => assert.equal(c.record, out.result.summary.milestones[i].record));
+  assert.ok(['1년 6개월', '2년'].every((l) => out.result.summary.milestones.some((m) => m.label === l)));
+});
+
+// ---- 기준 요약(3년 매일 현금화)과 전략 비교 분리 ----
+test('기준 요약: 폼의 비교 기간·정책과 무관하게 3년·재순환 0% 장부', () => {
+  const ref = compute(F({ ...EXAMPLE_VALUES, horizonYears: '3', policyType: 'ratio', recyclePct: '0' }), SNAP);
+  for (const y of ['0.5', '1', '2', '3']) {
+    const b = computeBaseline(F({ ...EXAMPLE_VALUES, horizonYears: y, usage: 'switch', policyType: 'switch', switchDay: '30', recyclePct: '70' }), SNAP);
+    assert.deepEqual(b.errors, []);
+    assert.equal(b.scenario.horizonYears, BASELINE_YEARS);
+    assert.deepEqual(b.policy, BASELINE_POLICY);
+    assert.equal(b.result.daily.length, ref.result.daily.length);
+    for (const k of ['W', 'I', 'net', 'roiBps', 'paybackDay']) assert.equal(b.result.summary[k], ref.result.summary[k], `${y}년 선택 시 ${k}`);
+    assert.deepEqual(milestoneCards(b.result).map((c) => c.label), ['3개월', '6개월', '1년']);
+  }
+  const form = F({ horizonYears: '1', policyType: 'switch', switchDay: '30' }), copy = { ...form };
+  baselineForm(form);
+  assert.deepEqual(form, copy);                                         // 원본 폼 불변
+  assert.equal(optimizerHorizon({ horizonYears: '0.5' }), 0.5);
+  assert.equal(optimizerHorizon({ horizonYears: '2' }), 2);
+  assert.equal(optimizerHorizon({ horizonYears: '7' }), 3);
+  assert.equal(optimizerHorizon({}), 3);
+});
+
+test('전략 비교: 요청 복사본만 기간 변경, 기준 장부·폼 불변, 같은 기간·같은 예산 매일 현금화와 비교', async () => {
+  const form = applySimpleForm(F({ ...EXAMPLE_VALUES, horizonYears: '1' }));
+  const formCopy = JSON.parse(JSON.stringify(form));
+  const base = computeBaseline(form, SNAP);
+  const before = { W: base.result.summary.W, n: base.result.daily.length, policy: { ...base.policy } };
+  const req = optimizeRequest(base, SNAP, optimizerHorizon(form));
+  assert.deepEqual(req.horizons, [1]);
+  assert.equal(req.scenario.horizonYears, 1);
+  assert.equal(req.scenario.totalBudgetDai, base.budget.value);         // 기준과 같은 고정 예산
+  assert.equal(base.scenario.horizonYears, 3);                          // 기준 시나리오는 그대로
+
+  const res = await optimize({ scenario: req.scenario, snapshot: SNAP, years: req.horizons, fundings: req.fundings },
+    { search: { ratioStep: 5000, refineStep: 5000, switchStride: 120, yieldEvery: 1000 } });
+  const cmp = buildStrategyComparison(req, res);
+  assert.equal(cmp.status, 'OK');
+  const N = horizonDays(base.scenario.startDate, 1, base.scenario.periodMode);
+  assert.equal(cmp.strategy.daily.length, N);                           // 선택 기간에서 끝남(연장 없음)
+  assert.equal(cmp.baseline.daily.length, N);
+  assert.deepEqual(cmp.baseline.summary.I, cmp.strategy.summary.I);
+  assert.equal(cmp.sameBudget, true);
+  assert.equal(cmp.baseline.summary.initialCapitalDai, base.budget.value);
+  assert.ok(strategyIsCurrent(cmp, req));
+
+  // 최적화 결과는 기준 장부·폼에 쓰지 않는다
+  assert.deepEqual(form, formCopy);
+  assert.equal(base.result.summary.W, before.W);
+  assert.equal(base.result.daily.length, before.n);
+  assert.deepEqual(base.policy, before.policy);
+  assert.equal(computeBaseline(form, SNAP).result.summary.W, before.W);
+
+  // 다른 기간·다른 운전자금·다른 스냅샷 객체에는 이전 결과를 쓰지 않음, 같은 입력 재계산에는 유지
+  assert.equal(strategyIsCurrent(cmp, optimizeRequest(base, SNAP, 2)), false);
+  assert.equal(strategyIsCurrent(cmp, optimizeRequest(computeBaseline({ ...form, reserveDai: '30' }, SNAP), SNAP, 1)), false);
+  assert.equal(strategyIsCurrent(cmp, { ...req, snapshot: { ...SNAP } }), false);
+  assert.equal(strategyIsCurrent(cmp, optimizeRequest(computeBaseline(form, SNAP), SNAP, 1)), true);
+
+  // 승자 없음·재검산 불일치·다른 기간 결과는 비교를 만들지 않음
+  assert.equal(buildStrategyComparison(req, { results: [{ horizonYears: 1, winners: {}, replays: {} }] }).status, 'NO_WINNER');
+  assert.equal(buildStrategyComparison(req, { results: res.results.map((g) => ({ ...g, horizonYears: 2 })) }).status, 'NO_WINNER');
+  const bad = { results: [{ horizonYears: 1, candidatesEvaluated: 1,
+    winners: { maxRoi: { winner: { ...cmp.winner, W: cmp.winner.W + 1n }, replayKey: 'k' } }, replays: { k: { verified: true, full: cmp.strategy } } }] };
+  assert.equal(buildStrategyComparison(req, bad).status, 'REPLAY_MISMATCH');
+});
+
+test('그래프 범위: 기준 3년은 2년으로 자르고, 짧은 전략 장부는 늘리지 않음 · 고정 날짜는 장부에 있을 때만', () => {
+  const base = computeBaseline(F(EXAMPLE_VALUES), SNAP), s = base.scenario;
+  const n2 = horizonDays(s.startDate, 2, s.periodMode);
+  const w2 = chartWindow(base.result, s, 2);
+  assert.equal(w2.daily.length, n2);
+  assert.equal(w2.daily[n2 - 1], base.result.daily[n2 - 1]);
+  assert.deepEqual(w2.summary.milestones.map((m) => m.label), ['3개월', '6개월', '1년', '1년 6개월', '2년']);
+  const pb = base.result.summary.paybackDay;
+  assert.equal(w2.summary.paybackDay, pb !== null && pb < n2 ? pb : null);
+  assert.equal(chartModel(w2).n, n2);
+  assert.equal(chartWindow(base.result, s, 3), base.result);
+  assert.equal(base.result.summary.W, computeBaseline(F(EXAMPLE_VALUES), SNAP).result.summary.W);   // 자르기는 원본 불변
+  const one = compute(F(EXAMPLE_VALUES), SNAP).result;                                   // 1년 장부
+  assert.equal(chartWindow(one, s, 3).daily.length, one.daily.length);
+  assert.equal(chartWindow(one, s, 2).daily.length, one.daily.length);
+
+  const d = base.result.daily[400].date;
+  assert.equal(resolvePinnedIndex(base.result.daily, d), 400);
+  assert.equal(resolvePinnedIndex(one.daily, d), null);                                  // 1년 장부엔 없는 날짜
+  assert.equal(resolvePinnedIndex(w2.daily, base.result.daily.at(-1).date), null);
+  assert.equal(resolvePinnedIndex(base.result.daily, null), null);
+});
+
+test('입력 POWER: 값 종류·출처 구분, 입력 오류면 숫자 없음', () => {
+  const dai = compute(applySimpleForm(F({ ...EXAMPLE_VALUES, ...AUTO, asset: 'DAI' })), SNAP, MKT, NOWM);
+  const d = inputPowerView(dai);
+  assert.equal(d.value, dai.quote.powerPreview);
+  assert.notEqual(d.kind, 'POTENTIAL');
+  assert.match(d.typeText, /계산값/);
+  const lg = compute(applySimpleForm(F({ ...EXAMPLE_VALUES, ...AUTO, asset: 'LGNS', amount: '100', lgnsChain: 'anubis', route: 'ANUBIS_LGNS_BURN' })), SNAP, MKT, NOWM);
+  const l = inputPowerView(lg);
+  assert.equal(l.value, 200n * E18);
+  assert.equal(l.kind, 'ASSUMED');
+  assert.match(l.typeText, /가정/);
+  const strict = compute(applySimpleForm(F({ ...EXAMPLE_VALUES, ...AUTO, asset: 'LGNS', amount: '100', lgnsChain: 'anubis', route: 'ANUBIS_LGNS_BURN',
+    'engine.ignoreBurnCaps': false })), SNAP, MKT, NOWM);
+  assert.equal(inputPowerView(strict).kind, 'POTENTIAL');
+  assert.match(inputPowerView(strict).typeText, /활성 아님/);
+  assert.equal(inputPowerView({ errors: ['x'] }), null);
+  assert.equal(inputPowerView(null), null);
+});
+
+test('현금 문구: 모형 인출은 계산값으로 표기하고 "실제 현금"으로 부르지 않음', () => {
+  const ui = readFileSync(join(ROOT, 'src/ui.js'), 'utf8');
+  assert.doesNotMatch(ui, /실제 현금|실제 재소각/);
+  const m = chartModel(compute(F(), SNAP).result);
+  const labels = m.charts.flatMap((c) => c.series.filter((s) => /withdrawal/i.test(s.key)).map((s) => s.label));
+  assert.ok(labels.length >= 2 && labels.every((l) => /계산값/.test(l)), labels.join(', '));
 });
 
 test('간단 화면 HTML: 세부 설정은 닫힌 하나의 접기, 기간은 하단에 연결, 이름 중복 없음', () => {

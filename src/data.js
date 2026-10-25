@@ -30,6 +30,7 @@ export const CHAIN_READS = [
 export const API_FIELDS = [
   ['apiSellFeeBps', 'protocol', 'fees.sellFeeBps', 'bps'],
   ['apiTurbineFeeBps', 'protocol', 'fees.turbineFeeBps', 'bps'],
+  ['apiTurbineBurnBps', 'protocol', 'fees.turbineBurnBps', 'bps', '수령자 영향 미확인 · 계산 미반영'],
   ['apiLockSeconds', 'protocol', 'fees.turbineLockSeconds', 'seconds'],
   ['daySeconds', 'protocol', 'clock.daySeconds', 'seconds'],
   ['daiTokenAddress', 'protocol', 'contracts.DAI_ADDRESS', 'address', 'API 주소록 후보 — 코드/구현 대조 전'],
@@ -43,7 +44,7 @@ export const API_FIELDS = [
 ];
 // 현재 공개 응답 최상위 키(2026-10-23 증거 기준).
 export const API_TOP_KEYS = { protocol: ['fees', 'clock', 'contracts'], emission: ['clock', 'community', 'factor'], power: ['totalActivePower'] };
-const OPTIONAL_NULL = new Set(['communityActualToday']);
+const OPTIONAL_NULL = new Set(['communityActualToday', 'apiTurbineBurnBps']);
 const getPath = (o, p) => p.split('.').reduce((a, k) => (a == null ? undefined : a[k]), o);
 
 function assumedValues() {
@@ -74,7 +75,7 @@ export function snapshotFromEvidence(raw) {
 }
 
 // 도메인 규칙
-const BPS_KEYS = ['turbineFeeBps', 'sellFeeBps', 'apiSellFeeBps', 'apiTurbineFeeBps', 'poolFeeBps', 'factorBps'];
+const BPS_KEYS = ['turbineFeeBps', 'sellFeeBps', 'apiSellFeeBps', 'apiTurbineFeeBps', 'apiTurbineBurnBps', 'poolFeeBps', 'factorBps'];
 const POSITIVE_KEYS = ['daiPowerRateBps', 'ailgnsPowerRateBps', 'annualRateBps', 'oracleTwapDaiPerAilgns', 'daySeconds', 'lgnsPowerRate'];
 const NONNEG_KEYS = ['lockSeconds', 'apiLockSeconds', 'dailyBurnPowerCap', 'dailyAilgnsBurnPowerCap', 'dailyDaiPowerCap', 'dayStart', 'dappDay', 'communityBudgetToday', 'communityActualToday', 'totalActivePower'];
 function domainError(k, v) {
